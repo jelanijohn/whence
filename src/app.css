@@ -1,0 +1,193 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;450;500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20,400,0..1,0&display=swap");
+@import "tailwindcss";
+
+/* Class-based dark mode: toggle by adding/removing `dark` on <html>. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* =========================================================================
+ * Tidewater · Refined — Whence widget subset.
+ * Lifted from WAID so Whence reads as part of the family. Trimmed to what an
+ * ambient widget needs (panel, focus badge, status dot, timeline rail). The
+ * accent is Whence's own teal; the "W" brand mark stays the shared green.
+ * ========================================================================= */
+:root {
+  --accent: #14b8a6; /* Whence teal — distinct from WAID's blue */
+  --wn-brand-green: #40a87e; /* the shared "W" mark, fixed */
+
+  /* status palette — shared with the trio, muted */
+  --status-active: #3f9d63;
+  --status-awaiting: #d3982f;
+  --status-idle: #9aa0aa;
+
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* LIGHT */
+:root {
+  --bg: #ffffff;
+  --border: #ececef;
+  --border-soft: #f2f2f5;
+  --hover: #f6f7f9;
+  --fg: #15171c;
+  --fg-body: #3b404a;
+  --fg2: #6a6f7a;
+  --fg3: #9ca1ab;
+  --fg4: #b9bdc6;
+  --accent-tint: color-mix(in srgb, var(--accent) 9%, transparent);
+  --shadow-win: 0 10px 30px rgba(18, 28, 48, 0.16), 0 0 0 1px rgba(18, 28, 48, 0.06);
+}
+
+/* DARK — applied under .dark on <html> */
+.dark {
+  --bg: #0f1217;
+  --border: #1e222a;
+  --border-soft: #181b21;
+  --hover: rgba(255, 255, 255, 0.038);
+  --fg: #e9ebef;
+  --fg-body: #b4bac4;
+  --fg2: #868c97;
+  --fg3: #5c626d;
+  --fg4: #474d57;
+  --accent: #2dd4bf;
+  --accent-tint: color-mix(in srgb, var(--accent) 16%, transparent);
+  --shadow-win: 0 16px 44px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+html,
+body {
+  height: 100%;
+  /* Transparent so the borderless Tauri window shows the desktop through the
+     widget panel's rounded corners; the panel paints --bg itself. */
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+/* The widget panel — rounded, self-painted, drop-shadowed. */
+.panel {
+  background: var(--bg);
+  border-radius: 14px;
+  box-shadow: var(--shadow-win);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Material Symbols Rounded glyph span. */
+.msym {
+  font-family: "Material Symbols Rounded";
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  display: inline-block;
+  vertical-align: middle;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  font-variation-settings: "opsz" 20, "wght" 400, "GRAD" 0;
+}
+
+/* Status dot — sets `--sc` inline. */
+.sdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--sc);
+}
+.sdot.pulse {
+  animation: tw-pulse 2s infinite;
+}
+@keyframes tw-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--sc) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sdot.pulse {
+    animation: none;
+  }
+}
+
+.label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg3);
+}
+
+/* =========================================================================
+ * Form primitives — used by the Settings view. The token set above had no
+ * input/switch styling; these stay minimal and lean on the same vars.
+ * ========================================================================= */
+
+/* Text & number inputs. */
+.wn-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--fg-body);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.wn-input::placeholder {
+  color: var(--fg4);
+}
+.wn-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+/* Switch — the track; `.on` paints it accent, knob slides via translate. */
+.toggle {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--border);
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+.toggle.on {
+  background: var(--accent);
+}
+.toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.14s ease;
+}
+.toggle.on .toggle-knob {
+  transform: translateX(14px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .toggle,
+  .toggle-knob,
+  .wn-input {
+    transition: none;
+  }
+}

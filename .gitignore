@@ -1,0 +1,35 @@
+# --- Dependencies ---
+node_modules
+
+# --- Frontend build / SvelteKit ---
+/.svelte-kit
+/build
+/package
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# --- Tauri / Rust backend ---
+# Compiled artifacts and Tauri-generated platform code; Cargo.lock is kept
+# (this is a binary app — committed lockfiles give reproducible builds).
+/src-tauri/target
+/src-tauri/gen
+# Tauri updater signing keys — must never be committed.
+*.key
+*.pem
+
+# --- Environment ---
+.env
+.env.*
+!.env.example
+
+# --- Editors / OS ---
+/.idea
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
+npm-debug.log*
+pnpm-debug.log*

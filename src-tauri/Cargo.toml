@@ -1,0 +1,52 @@
+[package]
+name = "whence"
+version = "0.1.0"
+description = "Whence — ambient focus widget + local attribution sensor."
+authors = ["Jelani John"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin on Windows.
+# See https://github.com/rust-lang/cargo/issues/8519
+name = "whence_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+
+# --- Plugins ------------------------------------------------------------------
+# single-instance: a sensor must not run twice and double-write NeuroSkill labels.
+# Registered FIRST (Tauri requirement) so the second launch is killed before any
+# adapter spins up.
+tauri-plugin-single-instance = "2"
+# window-state: the widget "remembers position" across launches.
+tauri-plugin-window-state = "2"
+# autostart: opt-in only (settings toggle, default OFF — never default-on). A
+# hand-launched sensor has gaps, so this is more justified here than elsewhere,
+# but the strong opt-in ethos means it stays explicit.
+tauri-plugin-autostart = "2"
+
+# --- Core ---------------------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["clock"], default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# Transcript watching (Claude Code) + later cwd/file hints.
+notify = "6"
+# Ollama /api/ps poll and the NeuroSkill HTTP `label` write (à la WAID's client).
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Optional read-only NeuroSkill EEG read-back for the intensity meter (v1.5
+# polish; the write path is the v1 requirement). `bundled` avoids a system
+# libsqlite dependency. Gated so v1 builds don't pull SQLite unless asked.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+[features]
+default = []
+eeg-readback = ["dep:rusqlite"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
