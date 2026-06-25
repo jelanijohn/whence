@@ -1,0 +1,156 @@
+# Whence
+
+An ambient focus widget and **local attribution sensor**. Whence infers which
+project you're working on right now from your AI-tool activity, shows it in a
+small always-on-top widget, and writes attribution labels into NeuroSkill so the
+EEG data downstream knows *what* you were deep on — not just *how* deep.
+
+> Whence is a **producer, a peer to NeuroSkill — not a consumer.** NeuroSkill
+> measures focus *intensity* (how deep, via EEG); Whence measures focus
+> *attribution* (deep on *what*). See [`whence-spec.md`](whence-spec.md) for the
+> full design and the framing.
+
+The whole design turns on one constraint: **attribution without surveillance.**
+Whence reads the work artifacts you already produce — prompts, cwd, session
+lifecycle — never which window is foregrounded. It piggybacks on actions you were
+already taking; it never asks "what are you doing?", and it is diagnostic, never
+evaluative (no "you switched 9 times"). Local-first: no backend, no cloud, no
+auth.
+
+---
+
+## How it works
+
+```
+adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · timeline)
+```
+
+A surface adapter turns a native signal into a normalized `WorkEvent`. The
+**segmentation engine** debounces those events into focus *blocks* — deciding
+when a switch *actually* happened (a 30-second glance at another repo is not a
+context switch; an hour is). Each confirmed block drives three outputs at once:
+the widget, a NeuroSkill label write, and the local timeline.
+
+The intelligence is in *not* flickering. A switch is confirmed only when a
+candidate project clears a sustained-evidence threshold (`switch_min_seconds`); a
+quiet gap longer than `idle_timeout_seconds` ends the block. **Status**
+(`active` / `awaiting_input` / `idle`) is split out from focus — it surfaces to
+the widget *immediately* and never moves a block boundary, so the widget can
+light up the instant Claude Code is waiting on you without risking a false
+switch.
+
+---
+
+## Architecture
+
+```
+src/                          SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4).
+  routes/                       +layout · the widget view (+page.svelte).
+  lib/
+    tauri.ts                    The only place naming backend commands + events.
+    types.ts                    WorkEvent / FocusBlock / FocusSnapshot / Settings
+                                  — mirrors the Rust serde reps field-for-field.
+    stores/focus.svelte.ts      Focus state (runes) fed by the focus event.
+    components/                 FocusBadge · StatusDot · BlockTimer · BlockTimeline
+                                  · IntensityMeter · SettingsPanel · Toggle · BrandMark.
+src-tauri/src/
+  lib.rs                        Plugin + command + window registration; spawns core.
+  commands.rs                   get_focus_state · get_today_blocks · get/set_settings.
+  orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
+  settings.rs                   Tiny JSON settings file in the app data dir.
+  adapters/
+    mod.rs                      WorkEvent model + adapter contract.
+    claude_code.rs              Transcript watch (the one live surface) + slug resolve.
+    ollama.rs                   /api/ps liveness poll (documented v1.5 stub).
+    terminal.rs                 Optional cwd hint (documented v1.5 stub).
+  engine/
+    segment.rs                  Debounce / switch confirmation / blocks — PURE,
+                                  fixture-tested: no I/O, every time comes in via
+                                  the event or an explicit `now`.
+    timeline.rs                 Local store: JSONL, one focus block per line.
+  neuroskill/
+    client.rs                   Label write over the daemon's HTTP API (bearer-gated).
+    eeg.rs                      Optional read-only intensity read-back (eeg-readback).
+```
+
+`engine/segment.rs` is the heart and is kept **pure** — feed it a `WorkEvent`
+sequence and assert the blocks. Anything needing the wall clock or a file lives
+in `orchestrator.rs`, which passes the result in.
+
+### Surface adapters
+
+Adding a surface = adding an adapter; nothing else changes. The only live one is
+**Claude Code transcript watch** (zero-config): it watches
+`~/.claude/projects/<encoded-cwd>/*.jsonl` with the `notify` crate and reads the
+session's `cwd` for the project, new appended lines for activity, and prompt text
+for confidence. `ollama.rs` (liveness) and `terminal.rs` (cwd hint) are
+documented v1.5 stubs.
+
+**Project slug** is the join key across the ecosystem — it must match WAID's
+brief slug and Who Am I's naming. Resolved in priority order: a `project_aliases`
+override keyed by transcript dir name, then the basename of the transcript's
+first `cwd` line (the lossless source), then the dir-name trailing segment as a
+provisional fallback.
+
+### NeuroSkill labels — the write path
+
+When the engine confirms a block on project P, Whence writes
+`Whence:project=<slug>:start` / `:end` into NeuroSkill — source-namespaced so it
+never collides with WAID's manual `waid:brief=<slug>:…` labels (downstream
+prefers the manual label on conflict). **The label is the only thing written.**
+The optional EEG read-back (behind the `eeg-readback` feature) is read-only.
+
+The daemon is reached over HTTP at `http://127.0.0.1:18444` by default. Token
+resolution is **WSL2-aware**: an explicit `neuroskill_token_path` setting →
+native `<config>/skill/daemon/auth.token` → WSL2 Windows-host discovery
+(`/mnt/<drive>/Users/<user>/AppData/Roaming/skill/daemon/auth.token`), because
+under WSL2 the daemon runs on the Windows host. Endpoint and token path are both
+overridable in settings; the token is read at call time, so rotation needs no
+restart.
+
+---
+
+## Develop
+
+Prerequisites: Node 20+, pnpm, Rust toolchain, and the
+[Tauri system dependencies](https://tauri.app/start/prerequisites/) for your OS.
+
+```bash
+pnpm install            # one-time setup
+pnpm tauri dev          # run the widget (frontend + Rust backend)
+pnpm tauri:wsl          # same, with the dmabuf renderer disabled for WSL2
+pnpm check              # svelte-check (frontend types)
+```
+
+```bash
+cd src-tauri && cargo test                          # engine + adapter + store tests
+cd src-tauri && cargo test --features eeg-readback  # include the SQLite read-back
+```
+
+The dev server runs on **port 1425** (WAID uses 1420, so both widgets can run at
+once).
+
+### Plugins
+
+- **`tauri-plugin-single-instance`** — registered first (a sensor must not run
+  twice and double-write labels).
+- **`tauri-plugin-window-state`** — the widget remembers its position.
+- **`tauri-plugin-autostart`** — **opt-in only**, default OFF; toggled via the
+  `autostart` setting, which reconciles the OS launch agent only when it changes.
+
+---
+
+## Status & scope
+
+Shipped (v0/v1): the Tauri + Svelte shell, the Claude Code transcript watcher,
+the segmentation engine, the JSONL timeline, the NeuroSkill label write, and the
+widget (current focus + status + block timer, with an expanded today's-blocks
+timeline). Planned: debounce calibration on real data (v1), Claude Code hooks for
+real-time `awaiting_input` status, Ollama liveness, optional terminal cwd, and
+the EEG intensity meter (v1.5), then Who Am I inbox candidates and WAID
+intention-vs-reality (v2). See [`whence-spec.md`](whence-spec.md) §13.
+
+By design Whence does **not**: scrape OS window/app focus (banned by principle),
+score or grade your focus (diagnostic only), touch the phone (desktop sensor
+only), or auto-write to anyone's record (it proposes; humans promote). It runs
+and stays entirely on-device.

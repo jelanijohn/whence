@@ -28,6 +28,7 @@ vite.config.ts.timestamp-*
 !.vscode/extensions.json
 .DS_Store
 Thumbs.db
+.claude/
 
 # --- Logs ---
 *.log
