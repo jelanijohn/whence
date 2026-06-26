@@ -15,6 +15,7 @@
     neuroskillEnabled: boolean;
     neuroskillEndpoint: string;
     neuroskillTokenPath: string;
+    neuroskillDataDir: string;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
     aliases: { key: string; value: string }[];
@@ -34,6 +35,7 @@
       neuroskillEnabled: s.neuroskillEnabled,
       neuroskillEndpoint: s.neuroskillEndpoint ?? "",
       neuroskillTokenPath: s.neuroskillTokenPath ?? "",
+      neuroskillDataDir: s.neuroskillDataDir ?? "",
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       aliases: Object.entries(s.projectAliases ?? {}).map(([key, value]) => ({ key, value })),
@@ -56,6 +58,7 @@
       neuroskillEnabled: d.neuroskillEnabled,
       neuroskillEndpoint: d.neuroskillEndpoint.trim() || null,
       neuroskillTokenPath: d.neuroskillTokenPath.trim() || null,
+      neuroskillDataDir: d.neuroskillDataDir.trim() || null,
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
@@ -72,6 +75,7 @@
       neuroskillEnabled: s.neuroskillEnabled,
       neuroskillEndpoint: s.neuroskillEndpoint ?? null,
       neuroskillTokenPath: s.neuroskillTokenPath ?? null,
+      neuroskillDataDir: s.neuroskillDataDir ?? null,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       aliases,
@@ -188,6 +192,15 @@
           type="text"
           placeholder="auto-resolve (native → WSL2 host)"
           bind:value={draft.neuroskillTokenPath}
+        />
+      </label>
+      <label class="flex flex-col gap-1">
+        <span style="color: var(--fg2); font-size: 12px;">Data dir override</span>
+        <input
+          class="wn-input"
+          type="text"
+          placeholder="activity.sqlite folder — auto (intensity meter)"
+          bind:value={draft.neuroskillDataDir}
         />
       </label>
     </div>

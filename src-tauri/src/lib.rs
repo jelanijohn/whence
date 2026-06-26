@@ -81,6 +81,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_focus_state,
             commands::get_today_blocks,
+            commands::get_focus_intensity,
             commands::get_settings,
             commands::set_settings,
         ])

@@ -29,6 +29,13 @@ pub struct Settings {
     /// `/mnt/c/Users/<you>/AppData/Roaming/skill/daemon/auth.token`.
     #[serde(default)]
     pub neuroskill_token_path: Option<String>,
+    /// Override the NeuroSkill **data directory** (the folder holding
+    /// `activity.sqlite`, the EEG store). `None` = auto-resolve (native local-data
+    /// dir, then WSL2 Windows-host discovery under `AppData/Local/NeuroSkill`).
+    /// Powers the optional read-only intensity meter; unrelated to the label write
+    /// path, which uses the token path above.
+    #[serde(default)]
+    pub neuroskill_data_dir: Option<String>,
     /// Explicit project-slug overrides keyed by Claude Code transcript **directory
     /// name** (e.g. `"-root-Projects-glue-mac" -> "glue-mac"`). Wins over the
     /// cwd- and dir-name-derived slug — the escape hatch for names the heuristics
@@ -49,6 +56,7 @@ impl Default for Settings {
             neuroskill_enabled: true,
             neuroskill_endpoint: None,
             neuroskill_token_path: None,
+            neuroskill_data_dir: None,
             project_aliases: HashMap::new(),
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,

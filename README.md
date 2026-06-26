@@ -55,7 +55,8 @@ src/                          SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4
                                   · IntensityMeter · SettingsPanel · Toggle · BrandMark.
 src-tauri/src/
   lib.rs                        Plugin + command + window registration; spawns core.
-  commands.rs                   get_focus_state · get_today_blocks · get/set_settings.
+  commands.rs                   get_focus_state · get_today_blocks ·
+                                  get_focus_intensity · get/set_settings.
   orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
   settings.rs                   Tiny JSON settings file in the app data dir.
   adapters/
@@ -70,7 +71,8 @@ src-tauri/src/
     timeline.rs                 Local store: JSONL, one focus block per line.
   neuroskill/
     client.rs                   Label write over the daemon's HTTP API (bearer-gated).
-    eeg.rs                      Optional read-only intensity read-back (eeg-readback).
+    eeg.rs                      Optional read-only intensity read-back + activity.sqlite
+                                  path resolution (eeg-readback feature).
 ```
 
 `engine/segment.rs` is the heart and is kept **pure** — feed it a `WorkEvent`
@@ -98,7 +100,17 @@ When the engine confirms a block on project P, Whence writes
 `Whence:project=<slug>:start` / `:end` into NeuroSkill — source-namespaced so it
 never collides with WAID's manual `waid:brief=<slug>:…` labels (downstream
 prefers the manual label on conflict). **The label is the only thing written.**
-The optional EEG read-back (behind the `eeg-readback` feature) is read-only.
+
+The optional EEG read-back (behind the `eeg-readback` feature) is the one *read*,
+and it is strictly read-only: it opens NeuroSkill's `activity.sqlite`
+`mode=ro&immutable=1` and issues a single scoped `eeg_timeseries` query to power
+the widget's intensity meter (mean `focus` over the last ~2 minutes, via
+`get_focus_intensity`). The data dir is resolved the same WSL2-aware way as the
+token, but against the daemon's *Local* AppData — explicit `neuroskill_data_dir`
+setting → native local-data dir → WSL2 host discovery
+(`/mnt/<drive>/Users/<user>/AppData/Local/NeuroSkill/activity.sqlite`). When the
+feature is off or no store is found, the command returns nothing and the meter
+hides — it never blocks focus tracking.
 
 The daemon is reached over HTTP at `http://127.0.0.1:18444` by default. Token
 resolution is **WSL2-aware**: an explicit `neuroskill_token_path` setting →
@@ -145,10 +157,11 @@ once).
 Shipped (v0/v1): the Tauri + Svelte shell, the Claude Code transcript watcher,
 the segmentation engine, the JSONL timeline, the NeuroSkill label write, and the
 widget (current focus + status + block timer, with an expanded today's-blocks
-timeline). Planned: debounce calibration on real data (v1), Claude Code hooks for
-real-time `awaiting_input` status, Ollama liveness, optional terminal cwd, and
-the EEG intensity meter (v1.5), then Who Am I inbox candidates and WAID
-intention-vs-reality (v2). See [`whence-spec.md`](whence-spec.md) §13.
+timeline), and the optional EEG intensity meter (read-only read-back, behind the
+`eeg-readback` feature). Planned: debounce calibration on real data (v1), Claude
+Code hooks for real-time `awaiting_input` status, Ollama liveness, and optional
+terminal cwd (v1.5), then Who Am I inbox candidates and WAID intention-vs-reality
+(v2). See [`whence-spec.md`](whence-spec.md) §13.
 
 By design Whence does **not**: scrape OS window/app focus (banned by principle),
 score or grade your focus (diagnostic only), touch the phone (desktop sensor

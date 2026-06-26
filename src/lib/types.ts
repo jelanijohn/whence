@@ -45,6 +45,7 @@ export interface Settings {
   neuroskillEnabled: boolean; // write attribution labels into NeuroSkill
   neuroskillEndpoint?: string | null; // override daemon URL; null = default :18444
   neuroskillTokenPath?: string | null; // override token file; null = auto (native → WSL2 host)
+  neuroskillDataDir?: string | null; // override data dir (activity.sqlite); null = auto; powers the intensity meter
   projectAliases: Record<string, string>; // transcript dir-name → canonical slug
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block

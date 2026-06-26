@@ -16,6 +16,13 @@ export function getTodayBlocks(): Promise<FocusBlock[]> {
   return invoke("get_today_blocks");
 }
 
+/** Mean EEG focus (0..100) over the recent window, or null when the optional
+ *  read-back isn't available (feature off, no daemon store, no recent epochs).
+ *  Drives the widget's intensity meter. */
+export function getFocusIntensity(): Promise<number | null> {
+  return invoke("get_focus_intensity");
+}
+
 export function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }

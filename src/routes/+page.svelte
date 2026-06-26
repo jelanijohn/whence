@@ -1,11 +1,12 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { focus, startFocus, stopFocus } from "$lib/stores/focus.svelte";
-  import { getTodayBlocks } from "$lib/tauri";
+  import { getTodayBlocks, getFocusIntensity } from "$lib/tauri";
   import type { FocusBlock } from "$lib/types";
   import FocusBadge from "$lib/components/FocusBadge.svelte";
   import StatusDot from "$lib/components/StatusDot.svelte";
   import BlockTimer from "$lib/components/BlockTimer.svelte";
+  import IntensityMeter from "$lib/components/IntensityMeter.svelte";
   import BlockTimeline from "$lib/components/BlockTimeline.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 
@@ -18,10 +19,27 @@
 
   let view = $state<View>("compact");
   let blocks = $state<FocusBlock[]>([]);
+  // Optional EEG intensity (null = read-back unavailable; the meter hides itself).
+  // Polled rather than pushed — it's a slow-moving read-back, not a focus event.
+  let intensity = $state<number | null>(null);
 
   $effect(() => {
     startFocus();
     return () => stopFocus();
+  });
+
+  $effect(() => {
+    let alive = true;
+    const poll = async () => {
+      const v = await getFocusIntensity().catch(() => null);
+      if (alive) intensity = v;
+    };
+    poll();
+    const id = setInterval(poll, 15000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   });
 
   // Header buttons toggle their view; clicking the active one returns to compact.
@@ -63,7 +81,10 @@
 
   <div class="flex items-center justify-between px-3 pb-3">
     <StatusDot status={focus.snapshot.status} />
-    <BlockTimer start={focus.snapshot.blockStart} />
+    <div class="flex items-center gap-3">
+      <IntensityMeter value={intensity} />
+      <BlockTimer start={focus.snapshot.blockStart} />
+    </div>
   </div>
 
   {#if view !== "compact"}

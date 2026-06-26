@@ -83,8 +83,8 @@ pub fn default_token_path() -> Option<PathBuf> {
 
 /// Are we running inside WSL? The daemon then typically runs on the Windows host,
 /// so its token lives under `/mnt/<drive>/Users/.../AppData/Roaming`, not the
-/// Linux config dir.
-fn is_wsl() -> bool {
+/// Linux config dir. Also used by the EEG read-back to find the host's data dir.
+pub(crate) fn is_wsl() -> bool {
     std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| {
             let s = s.to_ascii_lowercase();
