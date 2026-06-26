@@ -124,6 +124,11 @@ const HOOK_EVENTS: [&str; 5] = [
     "SessionEnd",
 ];
 
+/// Per-hook dispatch timeout (seconds). Whence's receiver answers instantly with an
+/// empty `200`, so this only ever bites when the listener is down — keep it short so
+/// a missing Whence never stalls a Claude Code turn.
+const HOOK_TIMEOUT_SECS: u32 = 5;
+
 /// Install (opt-in) the Claude Code `http` hooks that POST to Whence's loopback
 /// receiver. **Merge-preserving** — reads `~/.claude/settings.json`, adds our hook
 /// entries (idempotent, keyed by URL), and writes back without touching any other
@@ -195,9 +200,12 @@ fn write_json_pretty(path: &PathBuf, value: &serde_json::Value) -> Result<(), St
     std::fs::write(path, json).map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
-/// Our single hook spec: a fire-and-forget `http` POST to `url`.
+/// Our single hook spec: a fire-and-forget `http` POST to `url`. `async: true`
+/// makes Claude Code dispatch the request without blocking the turn (it never waits
+/// on Whence's receiver), and the short `timeout` bounds the dispatch so a stalled
+/// or absent listener can't hang the hook.
 fn whence_hook(url: &str) -> serde_json::Value {
-    serde_json::json!({ "type": "http", "url": url })
+    serde_json::json!({ "type": "http", "url": url, "timeout": HOOK_TIMEOUT_SECS, "async": true })
 }
 
 /// Merge Whence's `http` hooks into an existing settings object, idempotently.
@@ -325,6 +333,16 @@ mod tests {
                 .any(|h| h["type"] == "command")
         });
         assert!(has_user_cmd, "user's command hook was clobbered");
+    }
+
+    #[test]
+    fn installed_hook_is_fire_and_forget() {
+        let merged = merge_hook_config(serde_json::json!({}), URL);
+        let hook = merged["hooks"]["Stop"][0]["hooks"][0].clone();
+        assert_eq!(hook["type"], "http");
+        assert_eq!(hook["url"], URL);
+        assert_eq!(hook["async"], true);
+        assert_eq!(hook["timeout"], 5);
     }
 
     #[test]

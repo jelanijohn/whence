@@ -306,7 +306,8 @@ without your explicit promote. This is the better version of the earlier
 sessions.
 * **WAID (intention vs. reality).** WAID knows your *active* brief; Whence knows
 where the day *actually* went. Surface the delta — *"waid is your active brief,
-but today went to whatsnext"* — strictly diagnostic.
+but today went to whatsnext"* — strictly diagnostic. Design spec:
+[`docs/intention-vs-reality.md`](docs/intention-vs-reality.md).
 
 Both are **post-v1**. v1 is sensor + widget + NeuroSkill labels.
 
