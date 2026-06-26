@@ -376,6 +376,14 @@ widget. **This is the shippable sensor.**
 * **v1.5 — fidelity.** Claude Code hooks (real-time status); Ollama liveness;
 optional terminal cwd; optional EEG read-back / intensity meter.
 * **v2 — payoff pipes.** Who Am I inbox candidates; WAID intention-vs-reality.
+* **v2 (optional) — richer candidates.** Thread an aggregated semantic `detail`
+summary into `FocusBlock` so a Who Am I connector ingesting `timeline.jsonl` can
+draft *what* you did, not just *how long*. The block carries time-attribution
+today (`project`, `start`/`end`, `eventCount`, `meanConfidence`), but
+`WorkEvent.detail` (the prompt summary) is dropped at block close. Touches
+`engine/segment.rs` (carry detail through the open block), `engine/timeline.rs`
+(schema), `src/lib/types.ts` (sync). Ingestion contract: Who Am I reads
+`<app_data_dir>/timeline.jsonl` directly and dedupes on `(project, start)`.
 
 \---
 

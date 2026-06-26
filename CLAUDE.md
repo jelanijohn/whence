@@ -110,6 +110,13 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
 * **v1.5:** Claude Code hooks receiver (real-time `awaiting_input` status), Ollama
   liveness, optional terminal cwd, EEG read-back intensity meter, settings UI.
 * **v2:** Who Am I inbox candidates; WAID intention-vs-reality.
+* **v2 (optional):** thread an aggregated semantic `detail` summary into
+  `FocusBlock` so a Who Am I connector ingesting `timeline.jsonl` can draft *what*
+  you did, not just *how long* (the block carries time-attribution today, but
+  `WorkEvent.detail` is dropped at block close). Touches `engine/segment.rs` (carry
+  detail through the open block), `engine/timeline.rs` (schema), `src/lib/types.ts`
+  (keep TS in sync). Ingestion contract: Who Am I reads `<app_data_dir>/timeline.jsonl`
+  directly; dedupe on `(project, start)`.
 
 ## Style
 
