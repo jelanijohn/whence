@@ -50,10 +50,13 @@ pub struct Settings {
     #[serde(default)]
     pub hook_listen_addr_override: Option<String>,
     /// Poll Ollama's local API for inference **liveness** (a low-confidence status
-    /// signal only — never originates a focus switch; §5.2 / §14.5). Default on:
-    /// it's a read-only localhost poll that emits nothing when Ollama isn't
-    /// running, so it's zero-config like the transcript watcher.
-    #[serde(default = "default_true")]
+    /// signal only — never originates a focus switch; §5.2 / §14.5). **Opt-in,
+    /// default off:** Ollama activity is *unattributed* (it knows inference is
+    /// happening, not for what), so with the single status enum it can only paint
+    /// the widget `active` with no project — which reads like a malfunction. Until
+    /// temporal-correlation attribution lands, enable this only if you want the bare
+    /// liveness signal.
+    #[serde(default)]
     pub ollama_enabled: bool,
     /// Override the Ollama API origin. `None` = the built-in default
     /// (`http://localhost:11434`). Set this for a non-default host/port.
@@ -75,18 +78,12 @@ impl Default for Settings {
             neuroskill_data_dir: None,
             project_aliases: HashMap::new(),
             hook_listen_addr_override: None,
-            ollama_enabled: true,
+            ollama_enabled: false,
             ollama_endpoint: None,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
         }
     }
-}
-
-/// serde `default` for a `bool` field that should default to `true` (serde's own
-/// default for `bool` is `false`).
-fn default_true() -> bool {
-    true
 }
 
 /// Default loopback bind for the Claude Code hook receiver. Fixed port so the

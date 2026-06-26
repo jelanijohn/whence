@@ -98,9 +98,10 @@ served) to tell *inferring now* from *merely warm in memory*. When it sees fresh
 inference it emits a low-confidence, **unattributed** `active` event — enough to
 light the widget, but `project: None` so it can never originate or color a focus
 block (the honest limit from §5.2: Ollama knows inference is happening, not *for
-what*). It's read-only and zero-config (on by default, opt-out via the `ollama`
-setting; emits nothing when Ollama isn't running). `terminal.rs` (cwd hint) is a
-documented v1.5 stub.
+what*). It's **opt-in (default off)**: because that `active` is unattributed, with
+the single status enum it can only show the widget as `active` with no project, so
+you enable it via the `ollama` setting only if you want the bare liveness signal.
+`terminal.rs` (cwd hint) is a documented v1.5 stub.
 
 The **hooks receiver** (`hooks.rs`) complements transcript watch on the same
 surface with *live status* the transcript can't cleanly infer — the difference

@@ -151,8 +151,18 @@ impl Segmenter {
         let new_status = match ev.kind {
             WorkKind::AwaitingInput => Some(Status::AwaitingInput),
             WorkKind::Idle | WorkKind::SessionEnd => Some(Status::Idle),
-            k if k.is_focus_evidence() => Some(Status::Active),
-            _ => None,
+            // Explicit work signals (a prompt, a tool call, a session opening) always
+            // mean active — they're how `awaiting_input` is cleared by a real reply.
+            WorkKind::Prompt | WorkKind::ToolUse | WorkKind::SessionStart => Some(Status::Active),
+            // Generic activity — a transcript "file changed" or Ollama liveness — is a
+            // *weak* active signal: it lifts `idle` back to `active`, but must NOT
+            // override `awaiting_input`. When a Claude Code turn ends, the `Stop` hook
+            // (fast HTTP) sets `awaiting_input`, then the trailing end-of-turn
+            // transcript write lands a beat later (~100ms, filesystem-watch latency)
+            // as a generic `Active`; without this guard it clobbers `awaiting_input`
+            // straight back to `active` and the "awaiting you" state is never seen.
+            WorkKind::Active if self.status == Status::AwaitingInput => None,
+            WorkKind::Active => Some(Status::Active),
         };
         if let Some(s) = new_status {
             if s != self.status {
@@ -384,10 +394,33 @@ mod tests {
         assert_eq!(s.snapshot().status, Status::AwaitingInput);
         assert_eq!(s.snapshot().project.as_deref(), Some("waid"));
         assert_eq!(s.snapshot().block_start, Some(0));
-        // Activity resumes → back to Active, still the same block.
-        let resume = s.ingest(&ev(20, "waid"));
+        // A real reply (a prompt) resumes Active — the legitimate way out of awaiting.
+        let resume = s.ingest(&status_ev(20, "waid", WorkKind::Prompt));
         assert!(resume.contains(&Effect::StatusChanged(Status::Active)));
         assert!(closed(&resume).is_empty());
+    }
+
+    #[test]
+    fn awaiting_input_survives_trailing_transcript_write() {
+        // The end-of-turn race (captured live): the Stop hook sets awaiting_input,
+        // then the turn's final transcript write lands ~100ms later as a generic
+        // `Active`. It must NOT clobber awaiting back to active.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "whence")); // Active + open block
+        let awaiting = s.ingest(&status_ev(10, "whence", WorkKind::AwaitingInput));
+        assert_eq!(awaiting, vec![Effect::StatusChanged(Status::AwaitingInput)]);
+
+        // Trailing transcript write (generic Active) — suppressed for status.
+        let trailing = s.ingest(&ev(10, "whence"));
+        assert!(!trailing.iter().any(|e| matches!(e, Effect::StatusChanged(_))));
+        assert_eq!(s.snapshot().status, Status::AwaitingInput);
+        // …but it still extends the open block (focus path is unaffected).
+        assert!(closed(&trailing).is_empty());
+        assert_eq!(s.snapshot().block_start, Some(0));
+
+        // The next real prompt is what clears awaiting.
+        let reply = s.ingest(&status_ev(30, "whence", WorkKind::Prompt));
+        assert!(reply.contains(&Effect::StatusChanged(Status::Active)));
     }
 
     #[test]
