@@ -32,12 +32,19 @@ export interface FocusBlock {
   meanConfidence: number;
 }
 
-// The live snapshot the widget renders, pushed on the `whence://focus` event
-// and returned by the get_focus_state command.
-export interface FocusSnapshot {
-  project: string | null; // current focus, null = unattributed/idle
+// One live session row — one per project. The widget renders all of them; only the
+// `active` one drives the NeuroSkill label + timeline (attribution stays single).
+export interface SessionSnapshot {
+  project: string;
   status: Status;
-  blockStart: number | null; // unix seconds; null when no open block
+  blockStart: number | null; // unix seconds; the row timer counts from here
+  active: boolean; // the single focused project
+}
+
+// The live snapshot the widget renders, pushed on the `whence://focus` event and
+// returned by the get_focus_state command. Empty `sessions` = idle / nothing live.
+export interface FocusSnapshot {
+  sessions: SessionSnapshot[];
 }
 
 export interface Settings {

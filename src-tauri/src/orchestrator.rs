@@ -63,7 +63,7 @@ pub async fn run(
                         fire_label(&settings, neuroskill::end_label(&block.project));
                     }
                 }
-                Effect::StatusChanged(_) => { /* snapshot push below covers it */ }
+                Effect::SnapshotDirty => { /* snapshot push below covers it */ }
             }
         }
 

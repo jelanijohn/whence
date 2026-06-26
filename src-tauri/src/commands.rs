@@ -20,18 +20,15 @@ pub struct AppState {
     pub settings: Arc<Mutex<Settings>>,
 }
 
-/// Current focus snapshot (project + status + open-block start).
+/// Current focus snapshot — every live session (each with its own status + timer).
+/// A poisoned lock falls back to "no sessions" (idle) rather than panicking.
 #[tauri::command]
 pub fn get_focus_state(state: State<AppState>) -> FocusSnapshot {
     state
         .snapshot
         .lock()
         .map(|g| g.clone())
-        .unwrap_or(FocusSnapshot {
-            project: None,
-            status: crate::engine::segment::Status::Idle,
-            block_start: None,
-        })
+        .unwrap_or(FocusSnapshot { sessions: Vec::new() })
 }
 
 /// Today's closed focus blocks, oldest first — drives the expanded timeline.

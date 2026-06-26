@@ -6,7 +6,7 @@ import type { FocusSnapshot, FocusBlock, Settings } from "./types";
 
 export const FOCUS_EVENT = "whence://focus";
 
-/** Current focus snapshot (project + status + open-block start). */
+/** Current focus snapshot — every live session (each with status + row-timer start). */
 export function getFocusState(): Promise<FocusSnapshot> {
   return invoke("get_focus_state");
 }

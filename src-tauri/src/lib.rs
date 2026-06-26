@@ -17,7 +17,7 @@ use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
 use crate::commands::AppState;
-use crate::engine::segment::{FocusSnapshot, Status};
+use crate::engine::segment::FocusSnapshot;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -47,11 +47,8 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).ok();
 
             let loaded = settings::load(&data_dir);
-            let shared: orchestrator::SharedSnapshot = Arc::new(Mutex::new(FocusSnapshot {
-                project: None,
-                status: Status::Idle,
-                block_start: None,
-            }));
+            let shared: orchestrator::SharedSnapshot =
+                Arc::new(Mutex::new(FocusSnapshot { sessions: Vec::new() }));
             let settings_state = Arc::new(Mutex::new(loaded.clone()));
 
             app.manage(AppState {

@@ -3,19 +3,24 @@
   import { focus, startFocus, stopFocus } from "$lib/stores/focus.svelte";
   import { getTodayBlocks, getFocusIntensity } from "$lib/tauri";
   import type { FocusBlock } from "$lib/types";
-  import FocusBadge from "$lib/components/FocusBadge.svelte";
-  import StatusDot from "$lib/components/StatusDot.svelte";
-  import BlockTimer from "$lib/components/BlockTimer.svelte";
+  import BrandMark from "$lib/components/BrandMark.svelte";
+  import SessionRow from "$lib/components/SessionRow.svelte";
   import IntensityMeter from "$lib/components/IntensityMeter.svelte";
   import BlockTimeline from "$lib/components/BlockTimeline.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 
   type View = "compact" | "timeline" | "settings";
-  const SIZES: Record<View, { width: number; height: number }> = {
-    compact: { width: 300, height: 132 },
-    timeline: { width: 300, height: 300 },
-    settings: { width: 300, height: 460 },
+
+  // The compact area is a title bar + N session rows, so its height is dynamic.
+  // Expanded views add a fixed section below it.
+  const TITLE_H = 44;
+  const ROW_H = 30;
+  const LIST_PAD = 12;
+  const SECTION_H: Record<Exclude<View, "compact">, number> = {
+    timeline: 168,
+    settings: 328,
   };
+  const WIDTH = 300;
 
   let view = $state<View>("compact");
   let blocks = $state<FocusBlock[]>([]);
@@ -23,9 +28,39 @@
   // Polled rather than pushed — it's a slow-moving read-back, not a focus event.
   let intensity = $state<number | null>(null);
 
+  // Active session first, then alphabetical — so the focused project leads the list.
+  const sessions = $derived(
+    [...focus.snapshot.sessions].sort((a, b) =>
+      a.active !== b.active
+        ? a.active
+          ? -1
+          : 1
+        : a.project.localeCompare(b.project),
+    ),
+  );
+
+  function windowHeight(v: View, rowCount: number): number {
+    const compact = TITLE_H + Math.max(1, rowCount) * ROW_H + LIST_PAD;
+    return v === "compact" ? compact : compact + SECTION_H[v];
+  }
+
+  async function resize(height: number) {
+    try {
+      const { LogicalSize } = await import("@tauri-apps/api/dpi");
+      await getCurrentWindow().setSize(new LogicalSize(WIDTH, height));
+    } catch {
+      // No Tauri window (e.g. `vite dev` without the backend) — nothing to size.
+    }
+  }
+
   $effect(() => {
     startFocus();
     return () => stopFocus();
+  });
+
+  // Keep the window sized to the current view + live session count.
+  $effect(() => {
+    resize(windowHeight(view, sessions.length));
   });
 
   $effect(() => {
@@ -46,20 +81,23 @@
   async function setView(target: Exclude<View, "compact">) {
     view = view === target ? "compact" : target;
     if (view === "timeline") blocks = await getTodayBlocks().catch(() => []);
-    const { LogicalSize } = await import("@tauri-apps/api/dpi");
-    const size = SIZES[view];
-    await getCurrentWindow().setSize(new LogicalSize(size.width, size.height));
   }
 </script>
 
 <div class="panel select-none">
-  <!-- Drag region: the whole header moves the window (data-tauri-drag-region). -->
+  <!-- App title bar. The whole bar moves the window (data-tauri-drag-region). -->
   <header
     data-tauri-drag-region
     class="flex items-center justify-between gap-2 px-3 pt-3 pb-2"
   >
-    <FocusBadge project={focus.snapshot.project} />
-    <div class="flex shrink-0 items-center gap-1.5">
+    <span class="inline-flex items-center gap-2">
+      <BrandMark size={18} />
+      <span class="font-semibold" style="color: var(--fg); font-size: 15px;"
+        >Whence</span
+      >
+    </span>
+    <div class="flex shrink-0 items-center gap-2">
+      <IntensityMeter value={intensity} />
       <button
         class="msym"
         style="color: {view === 'settings' ? 'var(--accent)' : 'var(--fg3)'}; font-size: 18px; cursor: pointer;"
@@ -79,12 +117,21 @@
     </div>
   </header>
 
-  <div class="flex items-center justify-between px-3 pb-3">
-    <StatusDot status={focus.snapshot.status} />
-    <div class="flex items-center gap-3">
-      <IntensityMeter value={intensity} />
-      <BlockTimer start={focus.snapshot.blockStart} />
-    </div>
+  <!-- Live sessions: one row per project, or a quiet idle row when nothing's live. -->
+  <div class="pb-2">
+    {#if sessions.length === 0}
+      <div
+        class="flex items-center gap-2 px-3 py-1"
+        style="opacity: 0.55; color: var(--fg3); font-size: 14px;"
+      >
+        <span class="inline-block shrink-0" style="width: 16px;"></span>
+        idle
+      </div>
+    {:else}
+      {#each sessions as session (session.project)}
+        <SessionRow {session} />
+      {/each}
+    {/if}
   </div>
 
   {#if view !== "compact"}

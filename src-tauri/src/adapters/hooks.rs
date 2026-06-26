@@ -17,10 +17,11 @@
 //!     `None` for events we ignore). The clock comes in as a parameter.
 //!   * [`serve`] — the thin impure shell: bind `tiny_http`, read bodies, map, send.
 //!
-//! Status-only events (`Stop`/`Notification`) carry `project: None` — the engine
-//! ignores `project` for status (§7), so attribution there is moot. Focus-evidence
-//! events (`UserPromptSubmit` → `Prompt`) resolve a slug so the *active* status
-//! lands on the right project without waiting for the transcript debounce.
+//! Every event resolves a project slug — status-only ones (`Stop`/`Notification`)
+//! included. The widget shows one row per project, so a turn-finished `Stop` must
+//! mark *that* session "awaiting you"; focus-evidence events (`UserPromptSubmit` →
+//! `Prompt`) likewise land the *active* switch on the right project without waiting
+//! for the transcript debounce.
 
 use std::collections::HashMap;
 
@@ -79,13 +80,12 @@ pub fn hook_to_event(
         _ => return None,
     };
 
-    // Attribution only matters for focus evidence; status-only events (Stop,
-    // Notification, SessionEnd) don't move a block, so leave their project None.
-    let project = if kind.is_focus_evidence() {
-        resolve_slug(p, aliases)
-    } else {
-        None
-    };
+    // Resolve the project for *every* event, status-only ones included. The widget
+    // now shows one row per project (§ multi-session), so a `Stop`/`Notification`
+    // must say *which* session is awaiting you — its status lands on that project's
+    // row. The payload carries `transcript_path` on these events, so resolution works
+    // the same as for focus evidence.
+    let project = resolve_slug(p, aliases);
 
     Some(WorkEvent {
         ts: now_rfc3339.to_string(),
@@ -208,12 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn stop_is_awaiting_input_status_only() {
+    fn stop_is_awaiting_input_and_carries_its_project() {
         let ev = hook_to_event(&payload("Stop"), &no_aliases(), NOW).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
         assert_eq!(ev.surface, Surface::ClaudeCode);
-        // Status-only: never attributed, never moves a block.
-        assert_eq!(ev.project, None);
+        // Status-only, but still attributed so its row knows which session is awaiting.
+        assert_eq!(ev.project.as_deref(), Some("whence"));
         assert!(!ev.kind.is_focus_evidence());
         assert_eq!(ev.ts, NOW);
     }
