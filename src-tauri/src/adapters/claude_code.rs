@@ -139,7 +139,7 @@ fn resolve_slug(
 /// Caveat: a transcript synced from another machine carries that machine's `cwd`
 /// (e.g. a macOS path under a Linux dir). That only affects *historical* files;
 /// the session you're actively working in is local, so its `cwd` is correct.
-fn slug_from_cwd(path: &Path) -> Option<String> {
+pub(crate) fn slug_from_cwd(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {

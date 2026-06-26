@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{slug_from_transcript_dir, Surface, WorkEvent, WorkKind};
+use super::{claude_code, slug_from_transcript_dir, Surface, WorkEvent, WorkKind};
 
 /// The subset of a Claude Code hook payload we read. Claude Code adds fields over
 /// time, so everything is optional and unknown fields are ignored — a forward-
@@ -97,23 +97,36 @@ pub fn hook_to_event(
     })
 }
 
-/// Resolve a project slug for a hook event, mirroring the transcript adapter's
-/// priority but from the hook payload's fields:
+/// Resolve a project slug for a hook event, matching the transcript adapter's
+/// resolution so hook-derived focus events attribute to the same project the
+/// watcher does:
 ///   1. **Alias override** keyed by the transcript dir name (parent of
 ///      `transcript_path`) — the user's explicit last word.
-///   2. **`cwd` basename** — the lossless launch-dir signal the hook hands us.
+///   2. **Transcript launch dir** — the basename of the *first* `cwd` line in the
+///      transcript (`claude_code::slug_from_cwd`). This is the stable, lossless
+///      source. The payload's own `cwd` field is the session's *live* cwd, which
+///      drifts when the session `cd`s into a subdir (a `cargo` build under
+///      `whence/` would mis-attribute the prompt to `src-tauri`); the launch dir
+///      doesn't move.
 ///   3. **Dir-name heuristic** — the lossy `slug_from_transcript_dir` fallback.
+///   4. **Live `cwd` basename** — last resort, only when there's no transcript to
+///      read (so a drifted-but-real cwd still beats nothing).
 fn resolve_slug(p: &HookPayload, aliases: &HashMap<String, String>) -> Option<String> {
-    let dir_name = p.transcript_path.as_deref().and_then(transcript_dir_name);
-    if let Some(dir) = dir_name {
-        if let Some(slug) = aliases.get(dir) {
-            return Some(slug.clone());
+    if let Some(transcript_path) = p.transcript_path.as_deref() {
+        let dir_name = transcript_dir_name(transcript_path);
+        if let Some(dir) = dir_name {
+            if let Some(slug) = aliases.get(dir) {
+                return Some(slug.clone());
+            }
+        }
+        if let Some(slug) = claude_code::slug_from_cwd(std::path::Path::new(transcript_path)) {
+            return Some(slug);
+        }
+        if let Some(slug) = dir_name.and_then(slug_from_transcript_dir) {
+            return Some(slug);
         }
     }
-    if let Some(slug) = p.cwd.as_deref().and_then(basename) {
-        return Some(slug);
-    }
-    dir_name.and_then(slug_from_transcript_dir)
+    p.cwd.as_deref().and_then(basename)
 }
 
 /// The transcript's parent directory name (the alias-map key), e.g.
@@ -206,12 +219,50 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_focus_evidence_with_cwd_slug() {
+    fn prompt_is_focus_evidence_resolves_project() {
+        // payload()'s transcript_path doesn't exist, so resolution falls through to
+        // the dir-name heuristic — still "whence".
         let ev = hook_to_event(&payload("UserPromptSubmit"), &no_aliases(), NOW).unwrap();
         assert_eq!(ev.kind, WorkKind::Prompt);
         assert!(ev.kind.is_focus_evidence());
-        // cwd basename beats the lossy dir-name heuristic.
         assert_eq!(ev.project.as_deref(), Some("whence"));
+    }
+
+    #[test]
+    fn prompt_uses_transcript_launch_dir_not_drifted_cwd() {
+        use std::io::Write;
+        // A real transcript whose launch cwd is the project root, paired with a
+        // payload cwd that has drifted into a subdir (the live-observed bug: a
+        // `cd src-tauri` made the hook attribute the prompt to "src-tauri").
+        // Resolution must follow the stable launch dir, like the transcript watcher.
+        let dir = std::env::temp_dir().join("-root-Projects-blapp-web");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks-session.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{{\"type\":\"meta\"}}").unwrap();
+        writeln!(f, "{{\"type\":\"user\",\"cwd\":\"/root/Projects/blapp-web\"}}").unwrap();
+
+        let p = HookPayload {
+            hook_event_name: "UserPromptSubmit".into(),
+            cwd: Some("/root/Projects/blapp-web/packages/api".into()), // drifted
+            transcript_path: Some(path.to_string_lossy().into_owned()),
+            notification_type: None,
+        };
+        let ev = hook_to_event(&p, &no_aliases(), NOW).unwrap();
+        // Launch dir "blapp-web" beats the drifted cwd ("api") and lossy dir-name ("web").
+        assert_eq!(ev.project.as_deref(), Some("blapp-web"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prompt_without_transcript_falls_back_to_live_cwd() {
+        // No transcript to read → the (possibly drifted) live cwd still beats nothing.
+        let mut p = payload("UserPromptSubmit");
+        p.transcript_path = None;
+        p.cwd = Some("/root/Projects/glue".into());
+        let ev = hook_to_event(&p, &no_aliases(), NOW).unwrap();
+        assert_eq!(ev.project.as_deref(), Some("glue"));
     }
 
     #[test]
