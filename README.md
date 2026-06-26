@@ -50,14 +50,16 @@ src/                          SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4
     tauri.ts                    The only place naming backend commands + events.
     types.ts                    WorkEvent / FocusBlock / FocusSnapshot / Settings
                                   — mirrors the Rust serde reps field-for-field.
-    stores/focus.svelte.ts      Focus state (runes) fed by the focus event.
-    components/                 FocusBadge · StatusDot · BlockTimer · BlockTimeline
-                                  · IntensityMeter · SettingsPanel · Toggle · BrandMark.
+    stores/                     Focus + NeuroSkill-connection state (runes), each
+                                  fed by its event (focus · neuroskill).
+    components/                 FocusBadge · StatusDot · SessionRow · BlockTimer ·
+                                  BlockTimeline · IntensityMeter · NeuroskillStatusDot
+                                  · SettingsPanel · Toggle · BrandMark.
 src-tauri/src/
   lib.rs                        Plugin + command + window registration; spawns core.
   commands.rs                   get_focus_state · get_today_blocks ·
-                                  get_focus_intensity · get/set_settings ·
-                                  install/uninstall_claude_hooks.
+                                  get_focus_intensity · get_neuroskill_status ·
+                                  get/set_settings · install/uninstall_claude_hooks.
   orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
   settings.rs                   Tiny JSON settings file in the app data dir.
   adapters/
@@ -76,6 +78,7 @@ src-tauri/src/
     timeline.rs                 Local store: JSONL, one focus block per line.
   neuroskill/
     client.rs                   Label write over the daemon's HTTP API (bearer-gated).
+    health.rs                   Periodic side-effect-free connection probe + status.
     eeg.rs                      Optional read-only intensity read-back + activity.sqlite
                                   path resolution (eeg-readback feature).
 ```
@@ -161,6 +164,19 @@ under WSL2 the daemon runs on the Windows host. Endpoint and token path are both
 overridable in settings; the token is read at call time, so rotation needs no
 restart.
 
+Because labels are only written on block open/close — possibly minutes apart — a
+separate **connection-health probe** (`health.rs`) keeps the widget honest about
+whether the write path is live. On an interval it POSTs a benign no-op command to
+the daemon (the bearer check runs before dispatch, so it exercises reachability
+*and* auth without writing anything) and classifies the result: `connected`,
+`unauthorized` (token rejected), `unreachable` (daemon down), or `disabled`
+(label writing off). It reads settings each tick, so toggling the
+`neuroskill_enabled` setting or editing the endpoint/token reflects live. The
+status is pushed on a `whence://neuroskill` event (and readable via
+`get_neuroskill_status`) and surfaces as a color-coded dot in the widget header —
+diagnostic, never blocking: a down daemon just means the labels aren't written
+this session.
+
 ---
 
 ## Develop
@@ -201,7 +217,8 @@ widget (current focus + status + block timer, with an expanded today's-blocks
 timeline), the optional EEG intensity meter (read-only read-back, behind the
 `eeg-readback` feature), the Claude Code hooks receiver for real-time
 `awaiting_input` status (v1.5, opt-in), Ollama inference liveness (v1.5,
-low-confidence status), and the terminal cwd corroborator (v1.5, opt-in).
+low-confidence status), the terminal cwd corroborator (v1.5, opt-in), and the
+NeuroSkill connection-health indicator (v1.5).
 Planned: debounce calibration on real data (v1), then Who Am I inbox candidates
 and WAID intention-vs-reality (v2). See [`whence-spec.md`](whence-spec.md) §13.
 
