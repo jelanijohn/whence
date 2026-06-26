@@ -65,7 +65,8 @@ src-tauri/src/
     claude_code.rs              Transcript watch (the one live surface) + slug resolve.
     hooks.rs                    Loopback receiver for Claude Code http hooks —
                                   live awaiting_input status. PURE event mapping.
-    ollama.rs                   /api/ps liveness poll (documented v1.5 stub).
+    ollama.rs                   /api/ps inference-liveness poll (low-confidence
+                                  status only). PURE activity detection.
     terminal.rs                 Optional cwd hint (documented v1.5 stub).
   engine/
     segment.rs                  Debounce / switch confirmation / blocks — PURE,
@@ -88,8 +89,18 @@ Adding a surface = adding an adapter; nothing else changes. The only live one is
 **Claude Code transcript watch** (zero-config): it watches
 `~/.claude/projects/<encoded-cwd>/*.jsonl` with the `notify` crate and reads the
 session's `cwd` for the project, new appended lines for activity, and prompt text
-for confidence. `ollama.rs` (liveness) and `terminal.rs` (cwd hint) are
-documented v1.5 stubs.
+for confidence.
+
+**Ollama liveness** (`ollama.rs`) is the second live surface — but a *status*
+surface, not an attribution one. It polls Ollama's `/api/ps` and watches a model's
+`expires_at` advance between polls (a bumped keep-alive = a request was just
+served) to tell *inferring now* from *merely warm in memory*. When it sees fresh
+inference it emits a low-confidence, **unattributed** `active` event — enough to
+light the widget, but `project: None` so it can never originate or color a focus
+block (the honest limit from §5.2: Ollama knows inference is happening, not *for
+what*). It's read-only and zero-config (on by default, opt-out via the `ollama`
+setting; emits nothing when Ollama isn't running). `terminal.rs` (cwd hint) is a
+documented v1.5 stub.
 
 The **hooks receiver** (`hooks.rs`) complements transcript watch on the same
 surface with *live status* the transcript can't cleanly infer — the difference
@@ -173,11 +184,11 @@ Shipped (v0/v1): the Tauri + Svelte shell, the Claude Code transcript watcher,
 the segmentation engine, the JSONL timeline, the NeuroSkill label write, and the
 widget (current focus + status + block timer, with an expanded today's-blocks
 timeline), the optional EEG intensity meter (read-only read-back, behind the
-`eeg-readback` feature), and the Claude Code hooks receiver for real-time
-`awaiting_input` status (v1.5, opt-in). Planned: debounce calibration on real data
-(v1), Ollama liveness and optional terminal cwd (v1.5), then Who Am I inbox
-candidates and WAID intention-vs-reality (v2). See
-[`whence-spec.md`](whence-spec.md) §13.
+`eeg-readback` feature), the Claude Code hooks receiver for real-time
+`awaiting_input` status (v1.5, opt-in), and Ollama inference liveness (v1.5,
+low-confidence status). Planned: debounce calibration on real data (v1), optional
+terminal cwd (v1.5), then Who Am I inbox candidates and WAID intention-vs-reality
+(v2). See [`whence-spec.md`](whence-spec.md) §13.
 
 By design Whence does **not**: scrape OS window/app focus (banned by principle),
 score or grade your focus (diagnostic only), touch the phone (desktop sensor

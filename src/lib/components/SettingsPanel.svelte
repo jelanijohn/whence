@@ -21,6 +21,8 @@
     neuroskillEndpoint: string;
     neuroskillTokenPath: string;
     neuroskillDataDir: string;
+    ollamaEnabled: boolean;
+    ollamaEndpoint: string;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
     aliases: { key: string; value: string }[];
@@ -41,6 +43,8 @@
       neuroskillEndpoint: s.neuroskillEndpoint ?? "",
       neuroskillTokenPath: s.neuroskillTokenPath ?? "",
       neuroskillDataDir: s.neuroskillDataDir ?? "",
+      ollamaEnabled: s.ollamaEnabled,
+      ollamaEndpoint: s.ollamaEndpoint ?? "",
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       aliases: Object.entries(s.projectAliases ?? {}).map(([key, value]) => ({ key, value })),
@@ -50,7 +54,9 @@
   const clampSecs = (n: number): number => Math.max(1, Math.round(Number(n) || 1));
 
   // Build the wire payload: trim strings ('' → null), clamp seconds, drop blank
-  // alias rows. This is also what dirty-detection compares against.
+  // alias rows. This is also what dirty-detection compares against. Spread the
+  // last-saved baseline first so settings this panel doesn't surface (e.g.
+  // hookListenAddrOverride) survive a Save instead of being reset to default.
   function toSettings(d: Draft): Settings {
     const projectAliases: Record<string, string> = {};
     for (const { key, value } of d.aliases) {
@@ -59,11 +65,14 @@
       if (k && v) projectAliases[k] = v;
     }
     return {
+      ...(baseline as Settings),
       autostart: d.autostart,
       neuroskillEnabled: d.neuroskillEnabled,
       neuroskillEndpoint: d.neuroskillEndpoint.trim() || null,
       neuroskillTokenPath: d.neuroskillTokenPath.trim() || null,
       neuroskillDataDir: d.neuroskillDataDir.trim() || null,
+      ollamaEnabled: d.ollamaEnabled,
+      ollamaEndpoint: d.ollamaEndpoint.trim() || null,
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
@@ -81,6 +90,8 @@
       neuroskillEndpoint: s.neuroskillEndpoint ?? null,
       neuroskillTokenPath: s.neuroskillTokenPath ?? null,
       neuroskillDataDir: s.neuroskillDataDir ?? null,
+      ollamaEnabled: s.ollamaEnabled,
+      ollamaEndpoint: s.ollamaEndpoint ?? null,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       aliases,
@@ -230,6 +241,29 @@
           bind:value={draft.neuroskillDataDir}
         />
       </label>
+    </div>
+
+    <!-- Ollama -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Ollama</p>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Inference liveness</span>
+        <Toggle bind:checked={draft.ollamaEnabled} label="Ollama inference liveness" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Polls Ollama for active local inference — a status hint only, never a project switch.
+      </p>
+      {#if draft.ollamaEnabled}
+        <label class="flex flex-col gap-1">
+          <span style="color: var(--fg2); font-size: 12px;">Endpoint override</span>
+          <input
+            class="wn-input"
+            type="text"
+            placeholder="http://localhost:11434 (default)"
+            bind:value={draft.ollamaEndpoint}
+          />
+        </label>
+      {/if}
     </div>
 
     <!-- Claude Code hooks -->

@@ -48,6 +48,8 @@ export interface Settings {
   neuroskillDataDir?: string | null; // override data dir (activity.sqlite); null = auto; powers the intensity meter
   projectAliases: Record<string, string>; // transcript dir-name → canonical slug
   hookListenAddrOverride?: string | null; // override hook receiver bind; null = default 127.0.0.1:18450
+  ollamaEnabled: boolean; // poll Ollama for inference liveness (low-confidence status only)
+  ollamaEndpoint?: string | null; // override Ollama API origin; null = default http://localhost:11434
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block
 }

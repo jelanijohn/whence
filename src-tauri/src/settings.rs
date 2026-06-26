@@ -49,6 +49,16 @@ pub struct Settings {
     /// (spec principle #4); bind it somewhere only local processes can reach.
     #[serde(default)]
     pub hook_listen_addr_override: Option<String>,
+    /// Poll Ollama's local API for inference **liveness** (a low-confidence status
+    /// signal only — never originates a focus switch; §5.2 / §14.5). Default on:
+    /// it's a read-only localhost poll that emits nothing when Ollama isn't
+    /// running, so it's zero-config like the transcript watcher.
+    #[serde(default = "default_true")]
+    pub ollama_enabled: bool,
+    /// Override the Ollama API origin. `None` = the built-in default
+    /// (`http://localhost:11434`). Set this for a non-default host/port.
+    #[serde(default)]
+    pub ollama_endpoint: Option<String>,
     /// Sustained seconds before a focus switch is confirmed.
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
@@ -65,15 +75,26 @@ impl Default for Settings {
             neuroskill_data_dir: None,
             project_aliases: HashMap::new(),
             hook_listen_addr_override: None,
+            ollama_enabled: true,
+            ollama_endpoint: None,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
         }
     }
 }
 
+/// serde `default` for a `bool` field that should default to `true` (serde's own
+/// default for `bool` is `false`).
+fn default_true() -> bool {
+    true
+}
+
 /// Default loopback bind for the Claude Code hook receiver. Fixed port so the
 /// install URL and the listener bind stay in lockstep without templating.
 pub const DEFAULT_HOOK_ADDR: &str = "127.0.0.1:18450";
+
+/// Default Ollama API origin — the local daemon's well-known address.
+pub const DEFAULT_OLLAMA_ORIGIN: &str = "http://localhost:11434";
 
 impl Settings {
     pub fn segment_config(&self) -> crate::engine::segment::SegmentConfig {
@@ -89,6 +110,17 @@ impl Settings {
         self.hook_listen_addr_override
             .clone()
             .unwrap_or_else(|| DEFAULT_HOOK_ADDR.to_string())
+    }
+
+    /// The Ollama `/api/ps` URL to poll — the (override or default) origin with the
+    /// endpoint path appended, trailing slash tolerated.
+    pub fn ollama_ps_url(&self) -> String {
+        let origin = self
+            .ollama_endpoint
+            .as_deref()
+            .unwrap_or(DEFAULT_OLLAMA_ORIGIN)
+            .trim_end_matches('/');
+        format!("{origin}/api/ps")
     }
 }
 

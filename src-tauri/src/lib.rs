@@ -78,6 +78,14 @@ pub fn run() {
                     eprintln!("whence: hook receiver not started: {e}");
                 }
 
+                // Ollama liveness (v1.5): low-confidence status only, opt-out via
+                // settings. Independent task — it never blocks the watcher.
+                if loaded.ollama_enabled {
+                    let ollama_tx = tx.clone();
+                    let ps_url = loaded.ollama_ps_url();
+                    tauri::async_runtime::spawn(adapters::ollama::poll(ollama_tx, ps_url));
+                }
+
                 let _watcher = match adapters::claude_code::watch(tx, aliases) {
                     Ok(w) => w,
                     Err(e) => {
