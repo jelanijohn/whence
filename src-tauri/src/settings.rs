@@ -62,6 +62,19 @@ pub struct Settings {
     /// (`http://localhost:11434`). Set this for a non-default host/port.
     #[serde(default)]
     pub ollama_endpoint: Option<String>,
+    /// Receive cwd hints from a shell hook — a low-confidence **corroborator**
+    /// (§5.3): it reinforces the current focus (and holds a block open while you
+    /// work in the terminal with no AI activity) but never originates a switch.
+    /// **Opt-in, default off:** it needs a one-line shell snippet POSTing `$PWD` to
+    /// the loopback receiver (Whence never edits shell rc files), so enabling the
+    /// flag alone does nothing until that hook is added.
+    #[serde(default)]
+    pub terminal_enabled: bool,
+    /// Override the loopback address the terminal cwd receiver binds. `None` = the
+    /// built-in default (`127.0.0.1:18451`). Loopback-only by design — the receiver
+    /// is unauthenticated (principle #4).
+    #[serde(default)]
+    pub terminal_listen_addr_override: Option<String>,
     /// Sustained seconds before a focus switch is confirmed.
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
@@ -80,6 +93,8 @@ impl Default for Settings {
             hook_listen_addr_override: None,
             ollama_enabled: false,
             ollama_endpoint: None,
+            terminal_enabled: false,
+            terminal_listen_addr_override: None,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
         }
@@ -92,6 +107,10 @@ pub const DEFAULT_HOOK_ADDR: &str = "127.0.0.1:18450";
 
 /// Default Ollama API origin — the local daemon's well-known address.
 pub const DEFAULT_OLLAMA_ORIGIN: &str = "http://localhost:11434";
+
+/// Default loopback bind for the terminal cwd receiver. Distinct fixed port from
+/// the Claude hooks receiver (18450) so both can run at once.
+pub const DEFAULT_TERMINAL_ADDR: &str = "127.0.0.1:18451";
 
 impl Settings {
     pub fn segment_config(&self) -> crate::engine::segment::SegmentConfig {
@@ -107,6 +126,14 @@ impl Settings {
         self.hook_listen_addr_override
             .clone()
             .unwrap_or_else(|| DEFAULT_HOOK_ADDR.to_string())
+    }
+
+    /// The `host:port` the terminal cwd receiver binds — the override or the
+    /// built-in loopback default.
+    pub fn terminal_listen_addr(&self) -> String {
+        self.terminal_listen_addr_override
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TERMINAL_ADDR.to_string())
     }
 
     /// The Ollama `/api/ps` URL to poll — the (override or default) origin with the

@@ -86,6 +86,18 @@ pub fn run() {
                     tauri::async_runtime::spawn(adapters::ollama::poll(ollama_tx, ps_url));
                 }
 
+                // Terminal cwd receiver (v1.5): opt-in corroborating hints from a
+                // shell hook. Non-fatal on failure — a taken port just means no cwd
+                // corroboration; everything else still runs (degrade, don't crash).
+                if loaded.terminal_enabled {
+                    let terminal_addr = loaded.terminal_listen_addr();
+                    if let Err(e) =
+                        adapters::terminal::serve(tx.clone(), aliases.clone(), &terminal_addr)
+                    {
+                        eprintln!("whence: terminal cwd receiver not started: {e}");
+                    }
+                }
+
                 let _watcher = match adapters::claude_code::watch(tx, aliases) {
                     Ok(w) => w,
                     Err(e) => {

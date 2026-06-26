@@ -23,6 +23,7 @@
     neuroskillDataDir: string;
     ollamaEnabled: boolean;
     ollamaEndpoint: string;
+    terminalEnabled: boolean;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
     aliases: { key: string; value: string }[];
@@ -45,6 +46,7 @@
       neuroskillDataDir: s.neuroskillDataDir ?? "",
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? "",
+      terminalEnabled: s.terminalEnabled,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       aliases: Object.entries(s.projectAliases ?? {}).map(([key, value]) => ({ key, value })),
@@ -73,6 +75,7 @@
       neuroskillDataDir: d.neuroskillDataDir.trim() || null,
       ollamaEnabled: d.ollamaEnabled,
       ollamaEndpoint: d.ollamaEndpoint.trim() || null,
+      terminalEnabled: d.terminalEnabled,
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
@@ -92,6 +95,7 @@
       neuroskillDataDir: s.neuroskillDataDir ?? null,
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? null,
+      terminalEnabled: s.terminalEnabled,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       aliases,
@@ -263,6 +267,27 @@
             bind:value={draft.ollamaEndpoint}
           />
         </label>
+      {/if}
+    </div>
+
+    <!-- Terminal cwd -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Terminal</p>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Shell cwd hints</span>
+        <Toggle bind:checked={draft.terminalEnabled} label="Terminal cwd hints" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Corroborates the current project from your shell's directory — never switches focus on its own.
+      </p>
+      {#if draft.terminalEnabled}
+        <p style="color: var(--fg3); font-size: 11px;">
+          Add a shell hook POSTing <span class="tabular-nums">$PWD</span> to
+          <span class="tabular-nums">127.0.0.1:18451/cwd</span>. zsh:
+          <code style="color: var(--fg2); font-size: 10px; word-break: break-all;"
+            >{`chpwd(){ curl -sm1 -d "{\\"cwd\\":\\"$PWD\\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`}</code
+          >
+        </p>
       {/if}
     </div>
 

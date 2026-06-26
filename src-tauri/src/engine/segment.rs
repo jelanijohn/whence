@@ -180,6 +180,25 @@ impl Segmenter {
             return effects; // unattributed activity can't open/extend a block.
         };
 
+        // Corroborating evidence (a terminal `cd`, any low-confidence hint) may only
+        // *reinforce* the current focus — it never originates one. It can't open the
+        // first block from idle (a bare cwd isn't focus, §1/§5.3), and it never starts
+        // or advances a switch candidate (a background shell in another repo must not
+        // pull focus off the project you're actually working in). When it matches the
+        // current focus it extends the block — genuine evidence you're still on it,
+        // enough to push back the idle timeout — but it leaves any competing candidate
+        // alone, so primary signal stays in charge of switches.
+        if ev.is_corroborating() {
+            if let Some(cur) = &mut self.current {
+                if cur.project == project {
+                    cur.last_activity = ts;
+                    cur.event_count += 1;
+                    cur.confidence_sum += ev.confidence;
+                }
+            }
+            return effects;
+        }
+
         match &mut self.current {
             // No current focus — open immediately (first real evidence wins; the
             // debounce only guards *switching away* from an established focus).
@@ -421,6 +440,76 @@ mod tests {
         // The next real prompt is what clears awaiting.
         let reply = s.ingest(&status_ev(30, "whence", WorkKind::Prompt));
         assert!(reply.contains(&Effect::StatusChanged(Status::Active)));
+    }
+
+    /// A low-confidence corroborating event (a terminal `cd`), like the terminal
+    /// adapter emits.
+    fn corrob_ev(secs: i64, project: &str) -> WorkEvent {
+        WorkEvent {
+            ts: iso(secs),
+            surface: Surface::Terminal,
+            project: Some(project.to_string()),
+            kind: WorkKind::Active,
+            confidence: 0.4,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn corroborating_evidence_never_opens_a_block_from_idle() {
+        // A `cd` into a repo with no prior focus must NOT light up a block — a bare
+        // cwd is not, on its own, focus (§1/§5.3).
+        let mut s = Segmenter::new(SegmentConfig::default());
+        let eff = s.ingest(&corrob_ev(0, "waid"));
+        assert!(opened(&eff).is_empty());
+        assert_eq!(s.snapshot().project, None);
+        // It still counts as generic activity for *status* (idle → active).
+        assert_eq!(s.snapshot().status, Status::Active);
+    }
+
+    #[test]
+    fn corroborating_evidence_extends_matching_current_block() {
+        // On waid (primary), then only terminal `cd`s within waid for a long stretch.
+        // The corroboration keeps the block alive past what idle_timeout would close.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "waid"));
+        s.ingest(&corrob_ev(300, "waid"));
+        // A tick just after the original last_activity+timeout would have closed it,
+        // but corroboration at t=300 pushed last_activity forward.
+        assert!(s.tick(0 + 361).is_empty(), "corroboration should hold the block open");
+        assert_eq!(s.snapshot().project.as_deref(), Some("waid"));
+        // The corroborating event is folded into the block's evidence (and drags the
+        // mean confidence down, honestly reflecting the weaker signal).
+        let closed_eff = s.tick(300 + 361);
+        let b = &closed(&closed_eff)[0];
+        assert_eq!(b.event_count, 2);
+        assert!((b.mean_confidence - 0.7).abs() < 1e-9); // (1.0 + 0.4) / 2
+    }
+
+    #[test]
+    fn corroborating_evidence_never_drives_a_switch() {
+        // On waid (primary). A terminal sitting in another repo fires `cd`s well past
+        // switch_min_seconds — focus must stay on waid (low-confidence can't switch).
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "waid"));
+        for t in (30..400).step_by(30) {
+            let eff = s.ingest(&corrob_ev(t, "whoami"));
+            assert!(closed(&eff).is_empty() && opened(&eff).is_empty());
+        }
+        assert_eq!(s.snapshot().project.as_deref(), Some("waid"));
+    }
+
+    #[test]
+    fn corroborating_evidence_does_not_cancel_a_real_candidate() {
+        // A genuine switch is building (primary evidence on whoami). A terminal `cd`
+        // back in waid must not veto it — primary signal stays in charge.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "waid"));
+        s.ingest(&ev(60, "whoami")); // candidate starts at 60
+        s.ingest(&corrob_ev(90, "waid")); // weak nudge back — should not reset candidate
+        let confirm = s.ingest(&ev(155, "whoami")); // 155-60 = 95 >= 90 → switch confirms
+        assert_eq!(opened(&confirm), vec!["whoami"]);
+        assert_eq!(s.snapshot().project.as_deref(), Some("whoami"));
     }
 
     #[test]

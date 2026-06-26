@@ -67,7 +67,8 @@ src-tauri/src/
                                   live awaiting_input status. PURE event mapping.
     ollama.rs                   /api/ps inference-liveness poll (low-confidence
                                   status only). PURE activity detection.
-    terminal.rs                 Optional cwd hint (documented v1.5 stub).
+    terminal.rs                 Loopback receiver for shell cwd hints — a
+                                  low-confidence corroborator. PURE cwd mapping.
   engine/
     segment.rs                  Debounce / switch confirmation / blocks — PURE,
                                   fixture-tested: no I/O, every time comes in via
@@ -101,7 +102,20 @@ block (the honest limit from §5.2: Ollama knows inference is happening, not *fo
 what*). It's **opt-in (default off)**: because that `active` is unattributed, with
 the single status enum it can only show the widget as `active` with no project, so
 you enable it via the `ollama` setting only if you want the bare liveness signal.
-`terminal.rs` (cwd hint) is a documented v1.5 stub.
+
+**Terminal cwd** (`terminal.rs`) is a *corroborator*, not an attribution source. A
+one-line shell hook POSTs `{"cwd": "$PWD"}` to a loopback `tiny_http` listener
+(default `127.0.0.1:18451`, override via `terminal_listen_addr_override`) on each
+directory change; the adapter resolves the cwd to a slug (alias map, then the
+lossless basename) and emits a low-confidence `active` event. Low confidence is
+load-bearing: the engine treats any event below `CORROBORATION_CONFIDENCE` as
+*reinforcing* — it can extend the current block (handy when you're working in the
+terminal on the focused project with no AI activity) but **never** opens a block
+from idle or drives a switch, so a background shell in another repo can't pull
+focus. It's **opt-in (default off)** and needs the shell snippet — Whence never
+edits shell rc files; enabling `terminal` alone does nothing until you add the
+hook (the snippet is in Settings). The cwd-to-`WorkEvent` mapping is pure and
+fixture-tested; only the socket is impure.
 
 The **hooks receiver** (`hooks.rs`) complements transcript watch on the same
 surface with *live status* the transcript can't cleanly infer — the difference
@@ -186,10 +200,10 @@ the segmentation engine, the JSONL timeline, the NeuroSkill label write, and the
 widget (current focus + status + block timer, with an expanded today's-blocks
 timeline), the optional EEG intensity meter (read-only read-back, behind the
 `eeg-readback` feature), the Claude Code hooks receiver for real-time
-`awaiting_input` status (v1.5, opt-in), and Ollama inference liveness (v1.5,
-low-confidence status). Planned: debounce calibration on real data (v1), optional
-terminal cwd (v1.5), then Who Am I inbox candidates and WAID intention-vs-reality
-(v2). See [`whence-spec.md`](whence-spec.md) §13.
+`awaiting_input` status (v1.5, opt-in), Ollama inference liveness (v1.5,
+low-confidence status), and the terminal cwd corroborator (v1.5, opt-in).
+Planned: debounce calibration on real data (v1), then Who Am I inbox candidates
+and WAID intention-vs-reality (v2). See [`whence-spec.md`](whence-spec.md) §13.
 
 By design Whence does **not**: scrape OS window/app focus (banned by principle),
 score or grade your focus (diagnostic only), touch the phone (desktop sensor

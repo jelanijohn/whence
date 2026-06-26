@@ -50,6 +50,8 @@ export interface Settings {
   hookListenAddrOverride?: string | null; // override hook receiver bind; null = default 127.0.0.1:18450
   ollamaEnabled: boolean; // poll Ollama for inference liveness (low-confidence status only)
   ollamaEndpoint?: string | null; // override Ollama API origin; null = default http://localhost:11434
+  terminalEnabled: boolean; // receive shell cwd hints (low-confidence corroborator only)
+  terminalListenAddrOverride?: string | null; // override cwd receiver bind; null = default 127.0.0.1:18451
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block
 }
