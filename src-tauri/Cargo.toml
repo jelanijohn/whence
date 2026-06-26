@@ -36,6 +36,11 @@ chrono = { version = "0.4", features = ["clock"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # Transcript watching (Claude Code) + later cwd/file hints.
 notify = "6"
+# Tiny loopback HTTP server for the Claude Code hooks receiver (v1.5). Synchronous,
+# runs on its own thread like the `notify` watcher — no async server framework, and
+# tokio is built without the `net` feature. The receiver's only job is to accept
+# fire-and-forget POSTs from Claude Code's `http` hooks.
+tiny_http = "0.12"
 # Ollama /api/ps poll and the NeuroSkill HTTP `label` write (à la WAID's client).
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 

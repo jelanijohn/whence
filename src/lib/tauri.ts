@@ -32,6 +32,17 @@ export function setSettings(settings: Settings): Promise<Settings> {
   return invoke("set_settings", { settings });
 }
 
+/** Install (opt-in) the Claude Code `http` hooks that feed live `awaiting_input`
+ *  status. Merge-preserving write to ~/.claude/settings.json. */
+export function installClaudeHooks(): Promise<void> {
+  return invoke("install_claude_hooks");
+}
+
+/** Remove Whence's Claude Code hooks, leaving other config intact. */
+export function uninstallClaudeHooks(): Promise<void> {
+  return invoke("uninstall_claude_hooks");
+}
+
 /** Subscribe to live focus updates. Returns an unlisten fn. */
 export function onFocus(cb: (snap: FocusSnapshot) => void): Promise<UnlistenFn> {
   return listen<FocusSnapshot>(FOCUS_EVENT, (e) => cb(e.payload));

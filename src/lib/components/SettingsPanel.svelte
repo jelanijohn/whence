@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getSettings, setSettings } from "$lib/tauri";
+  import {
+    getSettings,
+    setSettings,
+    installClaudeHooks,
+    uninstallClaudeHooks,
+  } from "$lib/tauri";
   import type { Settings } from "$lib/types";
   import Toggle from "./Toggle.svelte";
 
@@ -122,6 +127,28 @@
       saving = false;
     }
   }
+
+  // Claude Code hooks — an immediate side effect (writes ~/.claude/settings.json),
+  // independent of the draft/Save flow above. Opt-in, reversible.
+  let hooksBusy = $state(false);
+  let hooksMsg = $state<string | null>(null);
+  let hooksErr = $state<string | null>(null);
+
+  async function runHooks(action: () => Promise<void>, ok: string) {
+    if (hooksBusy) return;
+    hooksBusy = true;
+    hooksMsg = null;
+    hooksErr = null;
+    try {
+      await action();
+      hooksMsg = ok;
+      setTimeout(() => (hooksMsg = null), 2400);
+    } catch (e) {
+      hooksErr = String(e);
+    } finally {
+      hooksBusy = false;
+    }
+  }
 </script>
 
 <div class="flex h-full flex-col">
@@ -203,6 +230,40 @@
           bind:value={draft.neuroskillDataDir}
         />
       </label>
+    </div>
+
+    <!-- Claude Code hooks -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Claude Code hooks</p>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Show <span style="color: var(--fg2);">waiting on you</span> the instant Claude finishes a turn.
+        Writes hooks into <span class="tabular-nums">~/.claude/settings.json</span> (opt-in, reversible).
+      </p>
+      <div class="flex items-center gap-1.5">
+        <button
+          type="button"
+          style="background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 7px; cursor: pointer;"
+          class:opacity-50={hooksBusy}
+          disabled={hooksBusy}
+          onclick={() => runHooks(installClaudeHooks, "Hooks installed")}
+        >
+          Install hooks
+        </button>
+        <button
+          type="button"
+          style="color: var(--fg2); font-size: 12px; padding: 5px 12px; border-radius: 7px; border: 1px solid var(--border-soft); cursor: pointer;"
+          class:opacity-50={hooksBusy}
+          disabled={hooksBusy}
+          onclick={() => runHooks(uninstallClaudeHooks, "Hooks removed")}
+        >
+          Remove
+        </button>
+      </div>
+      {#if hooksErr}
+        <span style="color: #d9544f; font-size: 11px;" title={hooksErr} class="truncate">{hooksErr}</span>
+      {:else if hooksMsg}
+        <span style="color: var(--accent); font-size: 11px;">{hooksMsg}</span>
+      {/if}
     </div>
 
     <!-- Project aliases -->

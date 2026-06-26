@@ -66,6 +66,18 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 let aliases = loaded.project_aliases.clone();
+
+                // Hooks receiver (v1.5): clone the sender *before* `watch` consumes
+                // it, then bind the loopback endpoint. Non-fatal on failure — a
+                // taken port just means no live `awaiting_input`; transcript-watch
+                // still runs (degrade, don't crash).
+                let hook_addr = loaded.hook_listen_addr();
+                if let Err(e) =
+                    adapters::hooks::serve(tx.clone(), aliases.clone(), &hook_addr)
+                {
+                    eprintln!("whence: hook receiver not started: {e}");
+                }
+
                 let _watcher = match adapters::claude_code::watch(tx, aliases) {
                     Ok(w) => w,
                     Err(e) => {
@@ -84,6 +96,8 @@ pub fn run() {
             commands::get_focus_intensity,
             commands::get_settings,
             commands::set_settings,
+            commands::install_claude_hooks,
+            commands::uninstall_claude_hooks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Whence");

@@ -43,6 +43,12 @@ pub struct Settings {
     /// from the canonical project slug). Empty by default.
     #[serde(default)]
     pub project_aliases: HashMap<String, String>,
+    /// Override the loopback address the Claude Code hook receiver binds (and the
+    /// URL written into the hook config). `None` = the built-in default
+    /// (`127.0.0.1:18450`). Loopback-only by design — the receiver is unauthenticated
+    /// (spec principle #4); bind it somewhere only local processes can reach.
+    #[serde(default)]
+    pub hook_listen_addr_override: Option<String>,
     /// Sustained seconds before a focus switch is confirmed.
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
@@ -58,11 +64,16 @@ impl Default for Settings {
             neuroskill_token_path: None,
             neuroskill_data_dir: None,
             project_aliases: HashMap::new(),
+            hook_listen_addr_override: None,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
         }
     }
 }
+
+/// Default loopback bind for the Claude Code hook receiver. Fixed port so the
+/// install URL and the listener bind stay in lockstep without templating.
+pub const DEFAULT_HOOK_ADDR: &str = "127.0.0.1:18450";
 
 impl Settings {
     pub fn segment_config(&self) -> crate::engine::segment::SegmentConfig {
@@ -70,6 +81,14 @@ impl Settings {
             switch_min_seconds: self.switch_min_seconds,
             idle_timeout_seconds: self.idle_timeout_seconds,
         }
+    }
+
+    /// The `host:port` the hook receiver binds — the override or the built-in
+    /// loopback default.
+    pub fn hook_listen_addr(&self) -> String {
+        self.hook_listen_addr_override
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOOK_ADDR.to_string())
     }
 }
 

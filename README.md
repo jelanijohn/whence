@@ -56,12 +56,15 @@ src/                          SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4
 src-tauri/src/
   lib.rs                        Plugin + command + window registration; spawns core.
   commands.rs                   get_focus_state · get_today_blocks ·
-                                  get_focus_intensity · get/set_settings.
+                                  get_focus_intensity · get/set_settings ·
+                                  install/uninstall_claude_hooks.
   orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
   settings.rs                   Tiny JSON settings file in the app data dir.
   adapters/
     mod.rs                      WorkEvent model + adapter contract.
     claude_code.rs              Transcript watch (the one live surface) + slug resolve.
+    hooks.rs                    Loopback receiver for Claude Code http hooks —
+                                  live awaiting_input status. PURE event mapping.
     ollama.rs                   /api/ps liveness poll (documented v1.5 stub).
     terminal.rs                 Optional cwd hint (documented v1.5 stub).
   engine/
@@ -87,6 +90,18 @@ Adding a surface = adding an adapter; nothing else changes. The only live one is
 session's `cwd` for the project, new appended lines for activity, and prompt text
 for confidence. `ollama.rs` (liveness) and `terminal.rs` (cwd hint) are
 documented v1.5 stubs.
+
+The **hooks receiver** (`hooks.rs`) complements transcript watch on the same
+surface with *live status* the transcript can't cleanly infer — the difference
+between Claude Code *running* and *awaiting your input*. It's a small loopback
+`tiny_http` listener (default `127.0.0.1:18450`, override via
+`hook_listen_addr_override`) that Claude Code's native `http` hooks POST to,
+fire-and-forget: `Stop`/`Notification` → `awaiting_input`, `UserPromptSubmit` →
+back to `active`. Installation is **opt-in** — `install_claude_hooks` (a button in
+Settings) does a merge-preserving write of the hook config into
+`~/.claude/settings.json`, and `uninstall_claude_hooks` round-trips it back out.
+The event-to-`WorkEvent` mapping is pure and fixture-tested; only the socket is
+impure.
 
 **Project slug** is the join key across the ecosystem — it must match WAID's
 brief slug and Who Am I's naming. Resolved in priority order: a `project_aliases`
@@ -157,11 +172,12 @@ once).
 Shipped (v0/v1): the Tauri + Svelte shell, the Claude Code transcript watcher,
 the segmentation engine, the JSONL timeline, the NeuroSkill label write, and the
 widget (current focus + status + block timer, with an expanded today's-blocks
-timeline), and the optional EEG intensity meter (read-only read-back, behind the
-`eeg-readback` feature). Planned: debounce calibration on real data (v1), Claude
-Code hooks for real-time `awaiting_input` status, Ollama liveness, and optional
-terminal cwd (v1.5), then Who Am I inbox candidates and WAID intention-vs-reality
-(v2). See [`whence-spec.md`](whence-spec.md) §13.
+timeline), the optional EEG intensity meter (read-only read-back, behind the
+`eeg-readback` feature), and the Claude Code hooks receiver for real-time
+`awaiting_input` status (v1.5, opt-in). Planned: debounce calibration on real data
+(v1), Ollama liveness and optional terminal cwd (v1.5), then Who Am I inbox
+candidates and WAID intention-vs-reality (v2). See
+[`whence-spec.md`](whence-spec.md) §13.
 
 By design Whence does **not**: scrape OS window/app focus (banned by principle),
 score or grade your focus (diagnostic only), touch the phone (desktop sensor

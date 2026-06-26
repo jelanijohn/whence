@@ -6,6 +6,7 @@
 //! and outputs never change. The model mirrors `src/lib/types.ts` field-for-field.
 
 pub mod claude_code;
+pub mod hooks;
 pub mod ollama;
 pub mod terminal;
 
