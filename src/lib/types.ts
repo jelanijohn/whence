@@ -23,6 +23,20 @@ export interface WorkEvent {
 
 export type Status = "active" | "awaiting_input" | "idle";
 
+// NeuroSkill daemon connection health, surfaced by the backend health probe.
+// Mirrors `NeuroskillStatus` in src-tauri/src/neuroskill/health.rs (snake_case).
+//   disabled     — label writing turned off; we don't probe
+//   connected    — daemon reachable + token accepted
+//   unauthorized — reachable but auth rejected (token missing/wrong)
+//   unreachable  — daemon not reachable (down / wrong endpoint)
+//   unknown      — not probed yet
+export type NeuroskillStatus =
+  | "disabled"
+  | "connected"
+  | "unauthorized"
+  | "unreachable"
+  | "unknown";
+
 // A closed focus block, as persisted to the JSONL timeline.
 export interface FocusBlock {
   project: string;

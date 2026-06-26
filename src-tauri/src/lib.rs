@@ -50,12 +50,27 @@ pub fn run() {
             let shared: orchestrator::SharedSnapshot =
                 Arc::new(Mutex::new(FocusSnapshot { sessions: Vec::new() }));
             let settings_state = Arc::new(Mutex::new(loaded.clone()));
+            let neuroskill_status: neuroskill::health::SharedStatus =
+                Arc::new(Mutex::new(neuroskill::health::NeuroskillStatus::default()));
 
             app.manage(AppState {
                 snapshot: shared.clone(),
                 data_dir: data_dir.clone(),
-                settings: settings_state,
+                settings: settings_state.clone(),
+                neuroskill: neuroskill_status.clone(),
             });
+
+            // NeuroSkill connection health: an independent probe loop that keeps the
+            // widget's connection indicator honest. Reads settings each tick, so it
+            // reflects the `neuroskill_enabled` toggle (and endpoint/token) live.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(neuroskill::health::watch(
+                    handle,
+                    settings_state,
+                    neuroskill_status,
+                ));
+            }
 
             // Spawn the core. The transcript watcher handle is held in-scope for
             // the task's lifetime (dropping it stops watching).
@@ -111,6 +126,7 @@ pub fn run() {
             commands::get_focus_state,
             commands::get_today_blocks,
             commands::get_focus_intensity,
+            commands::get_neuroskill_status,
             commands::get_settings,
             commands::set_settings,
             commands::install_claude_hooks,

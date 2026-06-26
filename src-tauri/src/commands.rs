@@ -11,6 +11,7 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::orchestrator::SharedSnapshot;
 use crate::engine::segment::{FocusBlock, FocusSnapshot};
 use crate::engine::timeline;
+use crate::neuroskill::health::{NeuroskillStatus, SharedStatus};
 use crate::settings::{self, Settings};
 
 /// Managed app state, shared across commands and the core task.
@@ -18,6 +19,10 @@ pub struct AppState {
     pub snapshot: SharedSnapshot,
     pub data_dir: PathBuf,
     pub settings: Arc<Mutex<Settings>>,
+    /// Live NeuroSkill connection status — written by the health probe loop, read
+    /// here for the widget's first paint (it then tracks the `whence://neuroskill`
+    /// event).
+    pub neuroskill: SharedStatus,
 }
 
 /// Current focus snapshot — every live session (each with its own status + timer).
@@ -66,6 +71,18 @@ pub fn get_focus_intensity(state: State<AppState>) -> Option<f64> {
         let _ = &state; // feature off: SQLite isn't compiled in, so there's nothing to read.
         None
     }
+}
+
+/// Current NeuroSkill connection status — drives the header indicator's first paint.
+/// The probe loop keeps this fresh and pushes changes on `whence://neuroskill`; a
+/// poisoned lock falls back to `Unknown` rather than panicking.
+#[tauri::command]
+pub fn get_neuroskill_status(state: State<AppState>) -> NeuroskillStatus {
+    state
+        .neuroskill
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(NeuroskillStatus::Unknown)
 }
 
 #[tauri::command]

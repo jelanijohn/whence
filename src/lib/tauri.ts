@@ -2,9 +2,15 @@
 // the frontend imports from here so the Rust contract has one front door.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { FocusSnapshot, FocusBlock, Settings } from "./types";
+import type {
+  FocusSnapshot,
+  FocusBlock,
+  Settings,
+  NeuroskillStatus,
+} from "./types";
 
 export const FOCUS_EVENT = "whence://focus";
+export const NEUROSKILL_EVENT = "whence://neuroskill";
 
 /** Current focus snapshot — every live session (each with status + row-timer start). */
 export function getFocusState(): Promise<FocusSnapshot> {
@@ -46,4 +52,16 @@ export function uninstallClaudeHooks(): Promise<void> {
 /** Subscribe to live focus updates. Returns an unlisten fn. */
 export function onFocus(cb: (snap: FocusSnapshot) => void): Promise<UnlistenFn> {
   return listen<FocusSnapshot>(FOCUS_EVENT, (e) => cb(e.payload));
+}
+
+/** Current NeuroSkill connection status — for first paint of the header indicator. */
+export function getNeuroskillStatus(): Promise<NeuroskillStatus> {
+  return invoke("get_neuroskill_status");
+}
+
+/** Subscribe to NeuroSkill connection-status changes. Returns an unlisten fn. */
+export function onNeuroskillStatus(
+  cb: (status: NeuroskillStatus) => void,
+): Promise<UnlistenFn> {
+  return listen<NeuroskillStatus>(NEUROSKILL_EVENT, (e) => cb(e.payload));
 }

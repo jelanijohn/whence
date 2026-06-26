@@ -19,6 +19,7 @@
 //! Whence only inferred).
 
 pub mod client;
+pub mod health;
 
 #[cfg(feature = "eeg-readback")]
 pub mod eeg;

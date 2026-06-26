@@ -1,11 +1,17 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { focus, startFocus, stopFocus } from "$lib/stores/focus.svelte";
+  import {
+    neuroskill,
+    startNeuroskill,
+    stopNeuroskill,
+  } from "$lib/stores/neuroskill.svelte";
   import { getTodayBlocks, getFocusIntensity } from "$lib/tauri";
   import type { FocusBlock } from "$lib/types";
   import BrandMark from "$lib/components/BrandMark.svelte";
   import SessionRow from "$lib/components/SessionRow.svelte";
   import IntensityMeter from "$lib/components/IntensityMeter.svelte";
+  import NeuroskillStatusDot from "$lib/components/NeuroskillStatusDot.svelte";
   import BlockTimeline from "$lib/components/BlockTimeline.svelte";
   import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 
@@ -58,6 +64,11 @@
     return () => stopFocus();
   });
 
+  $effect(() => {
+    startNeuroskill();
+    return () => stopNeuroskill();
+  });
+
   // Keep the window sized to the current view + live session count.
   $effect(() => {
     resize(windowHeight(view, sessions.length));
@@ -97,6 +108,7 @@
       >
     </span>
     <div class="flex shrink-0 items-center gap-2">
+      <NeuroskillStatusDot status={neuroskill.status} />
       <IntensityMeter value={intensity} />
       <button
         class="msym"

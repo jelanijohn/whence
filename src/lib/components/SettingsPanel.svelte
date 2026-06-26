@@ -7,6 +7,7 @@
     uninstallClaudeHooks,
   } from "$lib/tauri";
   import type { Settings } from "$lib/types";
+  import { neuroskill } from "$lib/stores/neuroskill.svelte";
   import Toggle from "./Toggle.svelte";
 
   // The settings form. Self-contained like BlockTimeline: loads its own state on
@@ -106,6 +107,29 @@
     draft && baseline ? canonical(toSettings(draft)) !== canonical(baseline) : false,
   );
 
+  // Live NeuroSkill connection health (backend probe) — the in-panel echo of the
+  // header indicator, so you can see the effect of an endpoint/token edit here.
+  const connColor = $derived(
+    neuroskill.status === "connected"
+      ? "var(--status-active)"
+      : neuroskill.status === "unauthorized"
+        ? "var(--status-awaiting)"
+        : neuroskill.status === "unreachable"
+          ? "var(--status-error)"
+          : "var(--fg4)",
+  );
+  const connLabel = $derived(
+    neuroskill.status === "connected"
+      ? "Connected"
+      : neuroskill.status === "unauthorized"
+        ? "Auth token rejected (401)"
+        : neuroskill.status === "unreachable"
+          ? "Unreachable — is the daemon running?"
+          : neuroskill.status === "disabled"
+            ? "Off"
+            : "Checking…",
+  );
+
   onMount(async () => {
     try {
       const s = await getSettings();
@@ -177,10 +201,6 @@
       <span style="color: var(--fg-body); font-size: 13px;">Launch at login</span>
       <Toggle bind:checked={draft.autostart} label="Launch at login" />
     </div>
-    <div class="flex items-center justify-between">
-      <span style="color: var(--fg-body); font-size: 13px;">Write NeuroSkill labels</span>
-      <Toggle bind:checked={draft.neuroskillEnabled} label="Write NeuroSkill labels" />
-    </div>
 
     <!-- Segmenter -->
     <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);" >
@@ -215,27 +235,41 @@
       </div>
     </div>
 
-    <!-- NeuroSkill overrides -->
+    <!-- NeuroSkill — toggle heads the section (like Ollama); the connection
+         overrides reveal only when label-writing is on. -->
     <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
       <p class="label" style="margin-top: 8px;">NeuroSkill</p>
-      <label class="flex flex-col gap-1">
-        <span style="color: var(--fg2); font-size: 12px;">Endpoint override</span>
-        <input
-          class="wn-input"
-          type="text"
-          placeholder="http://127.0.0.1:18444 (default)"
-          bind:value={draft.neuroskillEndpoint}
-        />
-      </label>
-      <label class="flex flex-col gap-1">
-        <span style="color: var(--fg2); font-size: 12px;">Token path override</span>
-        <input
-          class="wn-input"
-          type="text"
-          placeholder="auto-resolve (native → WSL2 host)"
-          bind:value={draft.neuroskillTokenPath}
-        />
-      </label>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Write attribution labels</span>
+        <Toggle bind:checked={draft.neuroskillEnabled} label="Write NeuroSkill labels" />
+      </div>
+      <!-- Live connection health from the backend probe — echoes the header dot. -->
+      <div class="flex items-center gap-1.5">
+        <span class="sdot" style="--sc: {connColor};"></span>
+        <span style="color: var(--fg2); font-size: 11px;">{connLabel}</span>
+      </div>
+      {#if draft.neuroskillEnabled}
+        <label class="flex flex-col gap-1">
+          <span style="color: var(--fg2); font-size: 12px;">Endpoint override</span>
+          <input
+            class="wn-input"
+            type="text"
+            placeholder="http://127.0.0.1:18444 (default)"
+            bind:value={draft.neuroskillEndpoint}
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span style="color: var(--fg2); font-size: 12px;">Token path override</span>
+          <input
+            class="wn-input"
+            type="text"
+            placeholder="auto-resolve (native → WSL2 host)"
+            bind:value={draft.neuroskillTokenPath}
+          />
+        </label>
+      {/if}
+      <!-- Data dir powers the read-only intensity meter, independent of the label
+           write path — so it stays visible regardless of the toggle. -->
       <label class="flex flex-col gap-1">
         <span style="color: var(--fg2); font-size: 12px;">Data dir override</span>
         <input
