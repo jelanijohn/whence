@@ -28,9 +28,12 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
 
 * **`src-tauri/src/adapters/`** — per-surface, pure-ish. Each translates a
   surface's native signal into a normalized `WorkEvent` and sends it on the core
-  channel. `claude_code.rs` (transcript watch) is the only live one; `ollama.rs`
-  and `terminal.rs` are documented v1.5 stubs. Adding a surface = adding an
-  adapter; nothing else changes.
+  channel. All are implemented: `claude_code.rs` (transcript watch) and
+  `hooks.rs` (the Claude Code hook receiver, a `tiny_http` listener on
+  `127.0.0.1:18450` for live `awaiting_input` status) run by default; `ollama.rs`
+  (`/api/ps` liveness) and `terminal.rs` (cwd corroborator on `127.0.0.1:18451`)
+  are opt-in, default OFF (`ollama_enabled` / `terminal_enabled`), and only
+  spawned when enabled. Adding a surface = adding an adapter; nothing else changes.
 * **`src-tauri/src/engine/segment.rs`** — the heart. **Pure and fixture-tested**:
   no I/O, no clock reads, every time comes in via the event or an explicit `now`.
   This is the debounce/switch-confirmation/block logic. *Keep it pure* — if you
@@ -106,9 +109,16 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
 
 * **v0 (done):** Tauri+Svelte shell, transcript watcher, widget shows current
   focus + status + block timer, JSONL timeline, NeuroSkill label write.
-* **v1:** calibrate the debounce on real data; expanded-timeline polish.
-* **v1.5:** Claude Code hooks receiver (real-time `awaiting_input` status), Ollama
-  liveness, optional terminal cwd, EEG read-back intensity meter, settings UI.
+* **v1 (mostly done):** debounce, idle, JSONL timeline, label write, compact +
+  expanded widget all ship. Remaining: the segmentation upgrade in the spec edit —
+  present-vs-running, the three-tier protect/yield trust model, and the two new
+  calibration knobs (corroborator confidence cutoff, attention-recency window) —
+  on `engine/segment.rs` + `src/lib/types.ts` + widget. Plus debounce calibration
+  on real data.
+* **v1.5 (done):** Claude Code hooks receiver (real-time `awaiting_input` status),
+  Ollama liveness, optional terminal cwd, EEG read-back intensity meter, settings
+  UI — all built (Ollama/terminal opt-in, default OFF). NeuroSkill connection-health
+  indicator added as a bonus.
 * **v2:** Who Am I inbox candidates; WAID intention-vs-reality.
 * **v2 (optional):** thread an aggregated semantic `detail` summary into
   `FocusBlock` so a Who Am I connector ingesting `timeline.jsonl` can draft *what*

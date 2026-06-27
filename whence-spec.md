@@ -180,11 +180,34 @@ interface WorkEvent {
 }
 ```
 
-`project` resolution maps a `cwd` / repo path to a stable **project slug** (file
-stem, same convention WAID uses for `waid:brief=<slug>`). A user-editable alias
-map handles paths that don't slugify cleanly. The slug is the join key across the
-whole ecosystem — it must match WAID's brief slug and Who Am I's project naming so
-the data lines up downstream.
+`project` resolution turns a `cwd` / repo path into a stable **project slug** — the
+join key across the whole ecosystem, so it must match WAID's `waid:brief=<slug>` and
+Who Am I's project naming. The Claude Code adapter (`adapters/claude\_code.rs`)
+resolves it in priority order:
+
+1. **Alias override** — `project\_aliases` (settings), keyed by the transcript
+**directory name** (the full encoded cwd, e.g. `-root-Projects-glue-mac`). The user's
+explicit last word; wins over everything.
+2. **Cached cwd result** — a per-directory memo so a session's cwd is read once, not
+re-derived on every transcript append.
+3. **`cwd` read from the transcript** (`slug\_from\_cwd`) — the basename of the
+session's launch directory, taken from its *first* `cwd` line. The only lossless
+source (the dir-name's `/`→`-` encoding is ambiguous), and using the *launch* cwd
+means a later `cd` into a subdir doesn't move attribution. Cached.
+4. **Dir-name heuristic** (`slug\_from\_transcript\_dir`) — the lossy trailing-segment
+fallback, used only when no `cwd` line is readable (older transcripts); *not* cached,
+so a later read can upgrade it.
+
+The terminal corroborator (`adapters/terminal.rs`) resolves the **same** slug from a
+raw cwd — alias override keyed by the cwd re-encoded to that dir-name form
+(`encode\_dir\_name`), else the cwd basename — so a single alias map governs every
+surface.
+
+Because the alias key is the full encoded path, it is **unique per absolute path**
+(two repos each rooted at a folder named `app` get distinct keys). That makes
+`project\_aliases` the deterministic naming / disambiguation layer: same path in →
+same slug out, with an alias as the guaranteed override when the default basename
+collides or reads wrong.
 
 \---
 
@@ -194,23 +217,88 @@ Capture is easy; **deciding when a switch actually happened** is the intelligenc
 A 30-second glance at another repo is *not* a context switch. An hour is. Get this
 wrong and the timeline reads "47 flickers today" instead of "3 real blocks."
 
-Model:
+The engine holds **one answer at a time** — the project you're on now — and changes
+it only when it's sure you've actually switched. Same project in → keep the current
+block going and write nothing. A different project in → it must prove itself before
+any label moves. Comparison is by *project*, not by file: bouncing between two
+files in the same repo is a no-op. (This is the one spot NeuroSkill's activity
+tracker differs — it re-records on every file change.)
 
-* **Current focus** = the project the engine currently believes you're on.
-* **Candidate focus** = a project accumulating evidence that *might* become the
-new current focus.
-* A `WorkEvent` for project P feeds P's candidate evidence.
-* A **switch is confirmed** only when a candidate clears a **debounce threshold** —
-expressed as *sustained evidence over a window*, not a single event (e.g.
-≥ `SWITCH\_MIN\_SECONDS` of activity, or ≥ N events, on P′ before flipping). Tune
-on real data; start \~60–120s.
-* **Idle**: no qualifying events for `IDLE\_TIMEOUT` (e.g. 5–10 min) ends the
-current block (status → idle; no project attributed to the gap).
-* A **focus block** = `{ project, start, end, eventCount, meanConfidence }`,
-written to the local timeline store on close.
+### How much each signal is trusted
 
-Tunables live in config, surfaced (read-only is fine for v1) so the debounce can
-be calibrated against your actual switching rhythm.
+Every `WorkEvent` falls into one of three tiers by how much it may change the
+current answer. The tier is read off `kind` + `confidence` — no model change; §6
+already separates `prompt` from `tool\_use`.
+
+* **You acted** — `prompt`, `session\_start` at full confidence. You're actually
+here. Strongest: can open a block, trigger and confirm a switch, and *protect* the
+current project from being pulled away by weaker signals.
+* **Claude worked on its own** — `tool\_use` and other autonomous transcript growth.
+High confidence in *which* project the work is on, low confidence in whether you're
+watching. Keeps the current block alive (and can open one from idle), but is slow
+to trigger a switch and never protects the current project.
+* **Weak hint** — anything below the corroborator confidence cutoff (terminal cwd,
+Ollama temporal correlation). Only nudges: reinforces whatever's already current;
+can't open, switch, or protect.
+
+Status events (`active` / `awaiting\_input` / `idle`) sit outside all three — they
+drive the widget immediately and never move a block (see *Status vs focus* below).
+
+### Rules
+
+* **Same project** → extend the current block (push `end`, bump `eventCount`, fold
+`confidence` into `meanConfidence`); clear any candidate. Nothing is written.
+* **Different project P′** → P′ becomes a *candidate*; how fast it accumulates
+depends on its tier:
+  * *You acted* → builds at full weight.
+  * *Claude worked* → builds slowly, and only once your interactive signal on the
+current project has gone stale (no `prompt` within the attention-recency window).
+A background task on P′ can't yank you off a project you're actively prompting on —
+only off one you've stopped touching.
+  * *Weak hint* → adds no candidate weight.
+* **Confirm the switch** when the candidate clears the **debounce threshold** —
+sustained evidence over a window, not a single event (≥ `SWITCH\_MIN\_SECONDS`, or
+≥ N events; start \~60–120s). On confirm: close the current block (write
+`Whence:project=<current>:end`, append the block to the timeline) and open the new
+one (`Whence:project=<new>:start`).
+* **Idle**: no *you-acted* or *Claude-worked* event for `IDLE\_TIMEOUT` (5–10 min)
+ends the block (status → idle; no project attributed to the gap). Weak hints don't
+reset it.
+* **`session\_end`** → close the current block.
+
+### Present vs running (honest attribution while work runs unattended)
+
+Track when you last *acted* (last `prompt`) separately from when the project last
+saw *any* activity:
+
+* a block is **present** while you've prompted within the attention-recency window —
+you're here;
+* it flips to **running** once only autonomous `tool\_use` has arrived since your
+last prompt — Claude is still going, but you may have stepped away.
+
+Either way the block stays open and **keeps accruing time** — autonomous work is
+still real work on that project. What changes is how hard it holds:
+
+* a **present** block makes any competing signal earn the full debounce before it
+can switch away;
+* a **running** block yields easily — a `prompt` in another project, or even a
+single weak hint pointing at another repo, switches away immediately, no waiting.
+
+The widget shows which one it is (`waid · active` vs `waid · running`), so the
+attribution never *claims* your attention when all it has is Claude's. This is the
+answer to "a background task on WAID while your eyes are on a browser": Whence holds
+WAID (the work is real, and it can't see your eyes without the banned window
+signal), labels it *running*, and drops it the moment any real signal points
+elsewhere.
+
+### Calibration
+
+`SWITCH\_MIN\_SECONDS` (\~60–120s) and `IDLE\_TIMEOUT` (\~5–10 min) already exist; the
+attention-aware behavior adds two more knobs: a **corroborator confidence cutoff**
+(\~0.6 — at or above it a signal can drive switches; below it only corroborates) and
+an **attention-recency window** (\~2 min — the present-vs-running boundary). All live
+in config and are surfaced read-only for v1 so the debounce can be calibrated
+against your actual switching rhythm.
 
 ### Status vs focus — a deliberate split (resolves one of the open forks)
 
@@ -276,6 +364,10 @@ techniques WAID already uses for its custom chrome.
 * **Current focus project** — name + the shared brand color/glyph for that project.
 * **Status** — active / awaiting-input / idle (driven by the immediate status path
 from §7).
+* **Present vs running** — whether the block is *present* (you've prompted recently)
+or *running* (only autonomous activity since), per §7. A subtle qualifier on the
+focus project (`waid · active` vs `waid · running`) so the widget never implies your
+attention when only Claude's is on the work.
 * **Block timer** — how long you've been on this block.
 * *(Optional)* **EEG intensity** — a small focus meter from the NeuroSkill
 read-back, when connected.
