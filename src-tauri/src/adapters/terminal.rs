@@ -9,7 +9,7 @@
 //! **Why corroboration, not attribution.** A cwd is weaker than a Claude Code
 //! transcript: a shell can sit in a repo you're not actively working, and a bare
 //! `cd` is not focus (treating it as such is the OS-scraping flavor §1 bans). So
-//! every event carries `confidence` below [`super::CORROBORATION_CONFIDENCE`] and
+//! every event carries a `confidence` below the engine's corroborator cutoff (§7) and
 //! the engine never lets it *originate* a focus — it only reinforces the current
 //! block when the project matches (`segment.rs`). Its real value: keeping a block
 //! alive while you work in the terminal on the focused project with no AI activity.
@@ -33,8 +33,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::{Surface, WorkEvent, WorkKind};
 
-/// Corroboration confidence for a cwd hint — deliberately below
-/// [`super::CORROBORATION_CONFIDENCE`] so the engine treats it as reinforcing, not
+/// Corroboration confidence for a cwd hint — deliberately below the engine's
+/// `corroborator_confidence_cutoff` (~0.6, §7) so it's treated as reinforcing, not
 /// originating. Matches the spec's temporal-correlation weight (§6, ~0.4).
 const CWD_CONFIDENCE: f64 = 0.4;
 
@@ -153,8 +153,9 @@ mod tests {
         assert_eq!(ev.kind, WorkKind::Active);
         assert_eq!(ev.project.as_deref(), Some("whence"));
         assert_eq!(ev.ts, NOW);
-        // Low confidence → the engine treats it as corroboration, never origination.
-        assert!(ev.is_corroborating());
+        // Low confidence (below the engine's corroborator cutoff) → the engine treats
+        // it as corroboration, never origination.
+        assert_eq!(ev.confidence, CWD_CONFIDENCE);
         assert_eq!(ev.detail.as_deref(), Some("cwd: /root/Projects/whence"));
     }
 

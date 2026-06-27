@@ -109,12 +109,18 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
 
 * **v0 (done):** Tauri+Svelte shell, transcript watcher, widget shows current
   focus + status + block timer, JSONL timeline, NeuroSkill label write.
-* **v1 (mostly done):** debounce, idle, JSONL timeline, label write, compact +
-  expanded widget all ship. Remaining: the segmentation upgrade in the spec edit —
-  present-vs-running, the three-tier protect/yield trust model, and the two new
-  calibration knobs (corroborator confidence cutoff, attention-recency window) —
-  on `engine/segment.rs` + `src/lib/types.ts` + widget. Plus debounce calibration
-  on real data.
+* **v1 (done):** debounce, idle, JSONL timeline, label write, compact + expanded
+  widget all ship. The segmentation upgrade landed — present-vs-running (the active
+  block reads `present` while you've acted within the attention-recency window, else
+  `running`; the widget shows `· present`/`· running` on the focus row), the
+  three-tier protect/yield trust model (you-acted `Prompt`/`SessionStart` switch
+  immediately and mark the block *present*; autonomous `ToolUse`/`Active` only build
+  a switch candidate once the block has gone *running*; a sub-cutoff weak hint
+  reinforces, and on a *running* block a stray hint elsewhere *drops* it), and the
+  two new calibration knobs (`corroborator_confidence_cutoff` ~0.6,
+  `attention_recency_seconds` ~120) — all on `engine/segment.rs` + `settings.rs` +
+  `src/lib/types.ts` + widget, fixture-tested. Remaining: debounce calibration on
+  real data.
 * **v1.5 (done):** Claude Code hooks receiver (real-time `awaiting_input` status),
   Ollama liveness, optional terminal cwd, EEG read-back intensity meter, settings
   UI — all built (Ollama/terminal opt-in, default OFF). NeuroSkill connection-health

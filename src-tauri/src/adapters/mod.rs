@@ -64,30 +64,20 @@ pub struct WorkEvent {
     pub detail: Option<String>,
 }
 
-/// Confidence at or above this is *primary* evidence (can originate a focus);
-/// below it the event is merely *corroborating* (§5.3). The split tracks the
-/// spec's own weighting (§6): cwd-derived attribution ~1.0, temporal/terminal
-/// hints ~0.4. The engine never lets corroborating evidence open a block from
-/// idle or drive a switch — see `engine::segment`.
-pub const CORROBORATION_CONFIDENCE: f64 = 0.5;
-
 impl WorkEvent {
     /// Parse `ts` to unix seconds. `None` if it isn't valid RFC-3339 — the engine
     /// drops such events rather than guessing a time.
+    ///
+    /// The *primary-vs-corroborating* split (whether a low-confidence hint may only
+    /// reinforce the current focus, never originate one) is **the engine's call**, not
+    /// the event's: it lives in `engine::segment` against the configurable
+    /// `corroborator_confidence_cutoff` (§7), so a bare `cd` (the OS-scraping flavor §1
+    /// bans) can never open or switch a block. Adapters just emit honest confidences
+    /// (§6: cwd-derived ~1.0, terminal/temporal hints ~0.4).
     pub fn ts_secs(&self) -> Option<i64> {
         chrono::DateTime::parse_from_rfc3339(&self.ts)
             .ok()
             .map(|dt| dt.timestamp())
-    }
-
-    /// Is this *corroborating* evidence (a low-confidence hint) rather than a
-    /// *primary* signal? Corroborating evidence may only reinforce the current
-    /// focus — it never originates one (no block from idle, no switch). A bare
-    /// `cd` into a repo is not, on its own, focus; treating it as such is the
-    /// OS-cwd-scraping flavor principle #1 bans. §5.3: "tiebreaker / corroborator,
-    /// not a primary signal."
-    pub fn is_corroborating(&self) -> bool {
-        self.confidence < CORROBORATION_CONFIDENCE
     }
 }
 

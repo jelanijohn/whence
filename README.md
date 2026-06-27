@@ -33,11 +33,24 @@ the widget, a NeuroSkill label write, and the local timeline.
 
 The intelligence is in *not* flickering. A switch is confirmed only when a
 candidate project clears a sustained-evidence threshold (`switch_min_seconds`); a
-quiet gap longer than `idle_timeout_seconds` ends the block. **Status**
-(`active` / `awaiting_input` / `idle`) is split out from focus — it surfaces to
-the widget *immediately* and never moves a block boundary, so the widget can
-light up the instant Claude Code is waiting on you without risking a false
-switch.
+quiet gap longer than `idle_timeout_seconds` ends the block.
+
+How fast a competing project can pull focus depends on *who* produced the
+evidence. **You acting** — a prompt or a session start — is explicit intent: it
+switches immediately and marks the block *present*. **Claude working on its own**
+— autonomous transcript growth — only builds a switch candidate once the current
+block has gone *running* (you've not acted within `attention_recency_seconds`),
+so a background task can't yank you off a project you're actively prompting on. A
+**weak hint** below `corroborator_confidence_cutoff` (a terminal `cd`) only
+reinforces the current block — except that a *running* block, which you may have
+stepped away from, yields to a single stray hint pointing elsewhere and drops. The
+widget marks which mode the focus block is in (`· present` vs `· running`) so it
+never implies your attention when only Claude's is on the work.
+
+**Status** (`active` / `awaiting_input` / `idle`) is split out from focus — it
+surfaces to the widget *immediately* and never moves a block boundary, so the
+widget can light up the instant Claude Code is waiting on you without risking a
+false switch.
 
 ---
 
@@ -111,11 +124,14 @@ one-line shell hook POSTs `{"cwd": "$PWD"}` to a loopback `tiny_http` listener
 (default `127.0.0.1:18451`, override via `terminal_listen_addr_override`) on each
 directory change; the adapter resolves the cwd to a slug (alias map, then the
 lossless basename) and emits a low-confidence `active` event. Low confidence is
-load-bearing: the engine treats any event below `CORROBORATION_CONFIDENCE` as
-*reinforcing* — it can extend the current block (handy when you're working in the
-terminal on the focused project with no AI activity) but **never** opens a block
-from idle or drives a switch, so a background shell in another repo can't pull
-focus. It's **opt-in (default off)** and needs the shell snippet — Whence never
+load-bearing: the engine treats any event below `corroborator_confidence_cutoff`
+as *reinforcing* — it can extend the current block (handy when you're working in
+the terminal on the focused project with no AI activity) but **never** opens a
+block from idle or originates a switch. A *present* block is fully protected from
+it; the one bite it has is on a *running* block (one you may have stepped away
+from), where a stray hint pointing at another repo drops the block — evidence
+you've moved on — though even then it never opens the other project itself. It's
+**opt-in (default off)** and needs the shell snippet — Whence never
 edits shell rc files; enabling `terminal` alone does nothing until you add the
 hook (the snippet is in Settings). The cwd-to-`WorkEvent` mapping is pure and
 fixture-tested; only the socket is impure.
@@ -212,9 +228,10 @@ once).
 ## Status & scope
 
 Shipped (v0/v1): the Tauri + Svelte shell, the Claude Code transcript watcher,
-the segmentation engine, the JSONL timeline, the NeuroSkill label write, and the
-widget (current focus + status + block timer, with an expanded today's-blocks
-timeline), the optional EEG intensity meter (read-only read-back, behind the
+the segmentation engine — including the three-tier trust model and present-vs-
+running attribution — the JSONL timeline, the NeuroSkill label write, and the
+widget (current focus + present/running + status + block timer, with an expanded
+today's-blocks timeline), the optional EEG intensity meter (read-only read-back, behind the
 `eeg-readback` feature), the Claude Code hooks receiver for real-time
 `awaiting_input` status (v1.5, opt-in), Ollama inference liveness (v1.5,
 low-confidence status), the terminal cwd corroborator (v1.5, opt-in), and the

@@ -79,6 +79,22 @@ pub struct Settings {
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
     pub idle_timeout_seconds: i64,
+    /// Confidence at/above which a signal is *primary* (can open/switch); below it
+    /// it's a weak corroborator. ~0.6 (§7). Defaulted so existing settings files load.
+    #[serde(default = "default_corroborator_cutoff")]
+    pub corroborator_confidence_cutoff: f64,
+    /// Seconds since your last act within which the active block reads *present* (vs
+    /// *running*). ~120 (§7). Defaulted so existing settings files load.
+    #[serde(default = "default_attention_recency")]
+    pub attention_recency_seconds: i64,
+}
+
+fn default_corroborator_cutoff() -> f64 {
+    0.6
+}
+
+fn default_attention_recency() -> i64 {
+    120
 }
 
 impl Default for Settings {
@@ -97,6 +113,8 @@ impl Default for Settings {
             terminal_listen_addr_override: None,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
+            corroborator_confidence_cutoff: 0.6,
+            attention_recency_seconds: 120,
         }
     }
 }
@@ -117,6 +135,8 @@ impl Settings {
         crate::engine::segment::SegmentConfig {
             switch_min_seconds: self.switch_min_seconds,
             idle_timeout_seconds: self.idle_timeout_seconds,
+            corroborator_confidence_cutoff: self.corroborator_confidence_cutoff,
+            attention_recency_seconds: self.attention_recency_seconds,
         }
     }
 

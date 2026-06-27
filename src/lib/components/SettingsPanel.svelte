@@ -27,6 +27,8 @@
     terminalEnabled: boolean;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
+    corroboratorConfidenceCutoff: number;
+    attentionRecencySeconds: number;
     aliases: { key: string; value: string }[];
   };
 
@@ -50,11 +52,16 @@
       terminalEnabled: s.terminalEnabled,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
+      corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
+      attentionRecencySeconds: s.attentionRecencySeconds,
       aliases: Object.entries(s.projectAliases ?? {}).map(([key, value]) => ({ key, value })),
     };
   }
 
   const clampSecs = (n: number): number => Math.max(1, Math.round(Number(n) || 1));
+  // Confidence is a 0..1 weight; clamp and keep two decimals of resolution.
+  const clamp01 = (n: number): number =>
+    Math.min(1, Math.max(0, Math.round((Number(n) || 0) * 100) / 100));
 
   // Build the wire payload: trim strings ('' → null), clamp seconds, drop blank
   // alias rows. This is also what dirty-detection compares against. Spread the
@@ -80,6 +87,8 @@
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
+      corroboratorConfidenceCutoff: clamp01(d.corroboratorConfidenceCutoff),
+      attentionRecencySeconds: clampSecs(d.attentionRecencySeconds),
     };
   }
 
@@ -99,6 +108,8 @@
       terminalEnabled: s.terminalEnabled,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
+      corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
+      attentionRecencySeconds: s.attentionRecencySeconds,
       aliases,
     });
   }
@@ -231,6 +242,35 @@
             bind:value={draft.idleTimeoutSeconds}
           />
           <span style="color: var(--fg3); font-size: 12px;">s</span>
+        </span>
+      </div>
+      <div class="flex items-center justify-between gap-2">
+        <span style="color: var(--fg-body); font-size: 13px;" title="Attention-recency window: how recently you must have prompted for the block to read “present” rather than “running”.">Attention window</span>
+        <span class="inline-flex items-center gap-1">
+          <input
+            class="wn-input tabular-nums"
+            style="width: 64px; text-align: right;"
+            type="number"
+            min="1"
+            step="1"
+            bind:value={draft.attentionRecencySeconds}
+          />
+          <span style="color: var(--fg3); font-size: 12px;">s</span>
+        </span>
+      </div>
+      <div class="flex items-center justify-between gap-2">
+        <span style="color: var(--fg-body); font-size: 13px;" title="Confidence at/above which a signal is primary (can switch focus); below it it only corroborates.">Weak-hint cutoff</span>
+        <span class="inline-flex items-center gap-1">
+          <input
+            class="wn-input tabular-nums"
+            style="width: 64px; text-align: right;"
+            type="number"
+            min="0"
+            max="1"
+            step="0.05"
+            bind:value={draft.corroboratorConfidenceCutoff}
+          />
+          <span style="color: var(--fg3); font-size: 12px;">conf</span>
         </span>
       </div>
     </div>

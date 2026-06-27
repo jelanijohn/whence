@@ -23,6 +23,11 @@ export interface WorkEvent {
 
 export type Status = "active" | "awaiting_input" | "idle";
 
+// Present vs running for the active block (§7). present = you acted within the
+// attention-recency window (you're here); running = only autonomous activity since
+// (Claude's going, you may have stepped away). Only the active row carries one.
+export type Presence = "present" | "running";
+
 // NeuroSkill daemon connection health, surfaced by the backend health probe.
 // Mirrors `NeuroskillStatus` in src-tauri/src/neuroskill/health.rs (snake_case).
 //   disabled     — label writing turned off; we don't probe
@@ -53,6 +58,7 @@ export interface SessionSnapshot {
   status: Status;
   blockStart: number | null; // unix seconds; the row timer counts from here
   active: boolean; // the single focused project
+  presence: Presence | null; // set only on the active row (§7); null otherwise
 }
 
 // The live snapshot the widget renders, pushed on the `whence://focus` event and
@@ -75,4 +81,6 @@ export interface Settings {
   terminalListenAddrOverride?: string | null; // override cwd receiver bind; null = default 127.0.0.1:18451
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block
+  corroboratorConfidenceCutoff: number; // ≥ this = primary signal; below = weak hint (§7)
+  attentionRecencySeconds: number; // present-vs-running boundary: act recency window (§7)
 }

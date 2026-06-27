@@ -14,14 +14,41 @@
 //! the active project drives the NeuroSkill label and the `timeline.jsonl` blocks,
 //! so the persisted attribution stays single-stream and non-overlapping.
 //!
-//! Two ways the active focus moves:
-//! * A **`UserPromptSubmit`** (`WorkKind::Prompt`) is explicit intent — it flips
-//!   `active` to that project **immediately**, no debounce. (Hooks only.)
-//! * **Transcript evidence** (`Active`/`SessionStart`/`ToolUse`) goes through the
-//!   debounce (sustained evidence over `switch_min_seconds`) — the fallback when
-//!   hooks aren't installed, so no-hooks behavior doesn't regress.
+//! ## The three-tier trust model (§7)
 //!
-//! The §7 status-vs-focus split lives here:
+//! Every focus-evidence event falls into one tier by how much it may change the
+//! active answer — read off `kind` + `confidence`, no model change:
+//!
+//! * **You acted** — `Prompt` / `SessionStart` at full confidence. You're actually
+//!   here. Strongest: opens a block, switches **immediately** (no debounce), and
+//!   marks the block *present*, which *protects* it from weaker signals.
+//! * **Claude worked** — autonomous transcript growth (`ToolUse` / `Active`). High
+//!   confidence in *which* project, low in whether you're watching. Keeps a block
+//!   alive (and can open one from idle), but is *slow* to trigger a switch and
+//!   *never* protects: it can only build a switch candidate once the current block
+//!   has gone *running* (your last prompt aged out).
+//! * **Weak hint** — anything below the corroborator confidence cutoff (terminal
+//!   cwd, Ollama temporal correlation). Only nudges: reinforces whatever's already
+//!   current. It can't open or originate a focus — but on a *running* block a stray
+//!   hint pointing at another repo is evidence you've physically moved on, so it
+//!   **drops** the running block (it still never *opens* the weak project).
+//!
+//! ## Present vs running (§7)
+//!
+//! The active block tracks when you last *acted* (last `Prompt`/`SessionStart`)
+//! separately from when the project last saw *any* activity:
+//!
+//! * **present** while you've acted within the attention-recency window — you're here;
+//! * **running** once only autonomous activity has arrived since — Claude's still
+//!   going, but you may have stepped away.
+//!
+//! Either way the block stays open and keeps accruing time (autonomous work is real
+//! work). What changes is how hard it holds: a *present* block makes any competing
+//! autonomous signal earn the full debounce (and is fully protected from weak hints);
+//! a *running* block yields easily — a single weak hint elsewhere drops it. The
+//! widget shows which it is (`waid · active` vs `waid · running`).
+//!
+//! The §7 status-vs-focus split also lives here:
 //! * **Focus switches** of the active project go through the rules above.
 //! * **Status changes** (`active`/`awaiting_input`/`idle`) land on a session row
 //!   immediately and never move a block boundary.
@@ -32,15 +59,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapters::{WorkEvent, WorkKind};
 
-/// Tunables (surfaced read-only in settings for v1; calibrate on real data).
+/// Tunables (surfaced in settings; calibrate the debounce on real data).
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentConfig {
     /// Sustained seconds of evidence on a *new* project before a transcript-driven
-    /// switch is confirmed. Start ~60–120s. (A `Prompt` bypasses this.)
+    /// switch is confirmed. Start ~60–120s. (A *you-acted* event bypasses this.)
     pub switch_min_seconds: i64,
     /// No qualifying events for this long ends the active block (status → idle; the
     /// gap is attributed to no project). Start ~300–600s.
     pub idle_timeout_seconds: i64,
+    /// Confidence at or above this is *primary* evidence (can open a block / drive a
+    /// switch); below it the event is a *weak hint* — it only corroborates the
+    /// current focus (and, on a *running* block, can drop it). ~0.6. Tracks the
+    /// spec's own weighting (§6): cwd-derived ~1.0, terminal/temporal hints ~0.4.
+    pub corroborator_confidence_cutoff: f64,
+    /// How recently you must have *acted* (a `Prompt`/`SessionStart`) for the active
+    /// block to count as *present* rather than *running* (§7 present-vs-running).
+    /// ~120s.
+    pub attention_recency_seconds: i64,
 }
 
 impl Default for SegmentConfig {
@@ -48,6 +84,8 @@ impl Default for SegmentConfig {
         Self {
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
+            corroborator_confidence_cutoff: 0.6,
+            attention_recency_seconds: 120,
         }
     }
 }
@@ -67,6 +105,18 @@ pub enum Status {
     Active,
     AwaitingInput,
     Idle,
+}
+
+/// Whether the active block reflects *your* presence or just autonomous work (§7).
+/// Only the active row carries one; every other row's `presence` is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Presence {
+    /// You've acted within the attention-recency window — you're here.
+    Present,
+    /// Only autonomous activity since your last act — Claude's going, you may have
+    /// stepped away.
+    Running,
 }
 
 /// A closed focus block — the unit written to the timeline on close. Attribution is
@@ -93,6 +143,8 @@ pub struct SessionSnapshot {
     pub block_start: Option<i64>,
     /// Is this the single focused project (drives the NeuroSkill label + timeline)?
     pub active: bool,
+    /// Present vs running — set only on the `active` row (§7); `None` otherwise.
+    pub presence: Option<Presence>,
 }
 
 /// What the widget renders right now: every live session. Empty = idle / nothing
@@ -127,7 +179,7 @@ struct SessionState {
 }
 
 /// Evidence accumulating for a project that *might* become the new active focus via
-/// the transcript-evidence debounce (a `Prompt` bypasses this entirely).
+/// the transcript-evidence debounce (a *you-acted* event bypasses this entirely).
 #[derive(Debug, Clone)]
 struct Candidate {
     project: String,
@@ -137,7 +189,8 @@ struct Candidate {
 }
 
 /// The stateful segmenter. Drive it with [`Segmenter::ingest`] per event and
-/// [`Segmenter::tick`] periodically (for idle, which is time- not event-driven).
+/// [`Segmenter::tick`] periodically (for idle + the present→running flip, both
+/// time- not event-driven).
 pub struct Segmenter {
     config: SegmentConfig,
     /// Every live project, keyed by slug. `BTreeMap` → stable (alphabetical) order.
@@ -147,6 +200,14 @@ pub struct Segmenter {
     /// When `active` became the focused project; the open block spans
     /// `active_since..(active session's last_activity)`.
     active_since: Option<i64>,
+    /// When you last *acted* on the active project (`Prompt`/`SessionStart`). Drives
+    /// present-vs-running. `None` = the block was opened by autonomous work and never
+    /// since touched by a you-acted event → *running* from the start.
+    active_last_prompt: Option<i64>,
+    /// Cached present/running of the active block (recomputed on ingest + tick so the
+    /// present→running flip emits a snapshot even with no new event). `None` when
+    /// nothing is active.
+    active_presence: Option<Presence>,
     /// Attribution accounting for the open block (the active project only).
     active_event_count: u32,
     active_confidence_sum: f64,
@@ -161,6 +222,8 @@ impl Segmenter {
             sessions: BTreeMap::new(),
             active: None,
             active_since: None,
+            active_last_prompt: None,
+            active_presence: None,
             active_event_count: 0,
             active_confidence_sum: 0.0,
             candidate: None,
@@ -173,13 +236,53 @@ impl Segmenter {
             sessions: self
                 .sessions
                 .iter()
-                .map(|(project, s)| SessionSnapshot {
-                    project: project.clone(),
-                    status: s.status,
-                    block_start: Some(s.start),
-                    active: active == Some(project.as_str()),
+                .map(|(project, s)| {
+                    let is_active = active == Some(project.as_str());
+                    SessionSnapshot {
+                        project: project.clone(),
+                        status: s.status,
+                        block_start: Some(s.start),
+                        active: is_active,
+                        presence: if is_active { self.active_presence } else { None },
+                    }
                 })
                 .collect(),
+        }
+    }
+
+    /// Is this a *weak hint* (low-confidence corroborator) rather than primary
+    /// evidence? Below the cutoff a signal only reinforces — it never opens a row,
+    /// originates a focus, or builds a candidate (§5.3).
+    fn is_weak(&self, ev: &WorkEvent) -> bool {
+        ev.confidence < self.config.corroborator_confidence_cutoff
+    }
+
+    /// Is this a *you-acted* event — explicit human intent that switches immediately
+    /// and marks the block *present* (§7 top tier)? A `Prompt` (you typed) or a
+    /// `SessionStart` (you launched Claude here), at primary confidence.
+    fn is_acted(&self, ev: &WorkEvent) -> bool {
+        matches!(ev.kind, WorkKind::Prompt | WorkKind::SessionStart)
+            && ev.confidence >= self.config.corroborator_confidence_cutoff
+    }
+
+    /// Present/running of the active block as of `now`. `None` if nothing is active.
+    fn presence_at(&self, now: i64) -> Option<Presence> {
+        self.active.as_ref()?;
+        match self.active_last_prompt {
+            Some(p) if now - p <= self.config.attention_recency_seconds => Some(Presence::Present),
+            _ => Some(Presence::Running),
+        }
+    }
+
+    /// Recompute the cached presence for `now`; return whether it changed (so the
+    /// caller can mark the snapshot dirty for the present→running flip).
+    fn refresh_presence(&mut self, now: i64) -> bool {
+        let p = self.presence_at(now);
+        if p != self.active_presence {
+            self.active_presence = p;
+            true
+        } else {
+            false
         }
     }
 
@@ -208,12 +311,14 @@ impl Segmenter {
             return finish(effects, dirty);
         }
 
-        // Corroborating evidence (a terminal `cd`, any low-confidence hint) may only
-        // *reinforce* an existing matching session — it never originates a row (a bare
-        // cwd isn't focus, §1/§5.3), never switches `active`, and never starts or
-        // advances a switch candidate. When it matches an existing session it refreshes
-        // it (and the active block's evidence, if that's the one it matched).
-        if ev.is_corroborating() {
+        // Weak hint (corroborating evidence — a terminal `cd`, any sub-cutoff signal).
+        // It may only *reinforce* an existing matching session: never originates a row
+        // (a bare cwd isn't focus, §1/§5.3), never opens a focus, never starts or
+        // advances a switch candidate. The one teeth it has: on a *running* block a
+        // stray hint pointing at a *different* repo is evidence you've physically moved,
+        // so it drops the running block (§7 "a running block yields easily"). Even then
+        // it never *opens* the weak project — whatever real evidence comes next does.
+        if self.is_weak(ev) {
             if let Some(s) = self.sessions.get_mut(&project) {
                 s.last_activity = ts;
                 if s.status == Status::Idle {
@@ -223,6 +328,15 @@ impl Segmenter {
                 if self.active.as_deref() == Some(project.as_str()) {
                     self.active_event_count += 1;
                     self.active_confidence_sum += ev.confidence;
+                }
+            }
+            // Running-yield: a stray hint elsewhere drops a running block.
+            if self.active.is_some()
+                && self.active.as_deref() != Some(project.as_str())
+                && self.presence_at(ts) == Some(Presence::Running)
+            {
+                if let Some(closed) = self.close_active() {
+                    effects.push(closed);
                 }
             }
             return finish(effects, dirty);
@@ -295,31 +409,41 @@ impl Segmenter {
         }
 
         // 3. Focus evidence drives the single `active` pointer.
+        let acted = self.is_acted(ev);
         match self.active.clone() {
-            // Already focused on this project — extend the open block's evidence.
+            // Already focused on this project — extend the open block's evidence. A
+            // you-acted event also refreshes presence (you're here / still here).
             Some(a) if a == project => {
                 self.active_event_count += 1;
                 self.active_confidence_sum += ev.confidence;
+                if acted {
+                    self.active_last_prompt = Some(ts);
+                }
                 self.candidate = None;
             }
             // Nothing focused — open immediately (first real evidence wins; the
             // debounce only guards *switching away* from an established focus).
             None => {
-                effects.push(self.open_active(&project, ts, 1, ev.confidence));
+                effects.push(self.open_active(&project, ts, 1, ev.confidence, acted));
                 self.candidate = None;
             }
             // A different project is focused.
             Some(_) => {
-                if matches!(ev.kind, WorkKind::Prompt) {
-                    // Explicit intent — switch immediately, no debounce.
+                if acted {
+                    // You acted — explicit intent, switch immediately, no debounce.
                     if let Some(closed) = self.close_active() {
                         effects.push(closed);
                     }
-                    effects.push(self.open_active(&project, ts, 1, ev.confidence));
+                    effects.push(self.open_active(&project, ts, 1, ev.confidence, true));
+                    self.candidate = None;
+                } else if self.presence_at(ts) == Some(Presence::Present) {
+                    // Claude worked, but the current block is *present* (you acted within
+                    // the recency window) — protected. A background task elsewhere can't
+                    // yank you off a project you're actively prompting on; build nothing.
                     self.candidate = None;
                 } else {
-                    // Transcript evidence — accumulate a candidate; confirm only once
-                    // it's been sustained for `switch_min_seconds`.
+                    // Claude worked while the current block is *running* — accumulate a
+                    // candidate; confirm only once it's been sustained for switch_min_seconds.
                     match &mut self.candidate {
                         Some(c) if c.project == project => {
                             c.event_count += 1;
@@ -342,19 +466,21 @@ impl Segmenter {
                         }
                         // Back-date the new block to the candidate's first event so it
                         // captures the full stretch on the new project.
-                        effects.push(self.open_active(&project, since, count, conf));
+                        effects.push(self.open_active(&project, since, count, conf, false));
                         self.candidate = None;
                     }
                 }
             }
         }
 
+        dirty |= self.refresh_presence(ts);
         finish(effects, dirty)
     }
 
     /// Time-driven check: close the active block if it's been idle past the timeout,
-    /// mark quiet rows idle, and drop rows that have lingered idle. Call periodically
-    /// (e.g. every 30s) with the current wall clock.
+    /// flip a stale-prompt block present→running, mark quiet rows idle, and drop rows
+    /// that have lingered idle. Call periodically (e.g. every 30s) with the current
+    /// wall clock.
     pub fn tick(&mut self, now: i64) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut dirty = false;
@@ -392,14 +518,28 @@ impl Segmenter {
             dirty = true;
         }
 
+        // The present→running flip is time-driven too — surface it to the widget.
+        if self.refresh_presence(now) {
+            dirty = true;
+        }
+
         finish(effects, dirty)
     }
 
-    /// Make `project` the active focus: record the start and seed the block's
-    /// evidence accounting. Returns the `BlockOpened` effect.
-    fn open_active(&mut self, project: &str, since: i64, count: u32, confidence_sum: f64) -> Effect {
+    /// Make `project` the active focus: record the start, seed the block's evidence
+    /// accounting, and set presence per `acted` (a you-acted open is *present*; an
+    /// autonomous open is *running* from the start). Returns the `BlockOpened` effect.
+    fn open_active(
+        &mut self,
+        project: &str,
+        since: i64,
+        count: u32,
+        confidence_sum: f64,
+        acted: bool,
+    ) -> Effect {
         self.active = Some(project.to_string());
         self.active_since = Some(since);
+        self.active_last_prompt = if acted { Some(since) } else { None };
         self.active_event_count = count;
         self.active_confidence_sum = confidence_sum;
         Effect::BlockOpened {
@@ -432,6 +572,8 @@ impl Segmenter {
         };
         self.active_event_count = 0;
         self.active_confidence_sum = 0.0;
+        self.active_last_prompt = None;
+        self.active_presence = None;
         Some(Effect::BlockClosed(block))
     }
 
@@ -456,7 +598,8 @@ mod tests {
     use super::*;
     use crate::adapters::Surface;
 
-    /// Build a focus-evidence event at `secs` for `project` (confidence 1.0).
+    /// Build a focus-evidence event at `secs` for `project` (confidence 1.0). This is
+    /// *autonomous* transcript growth (`Active`) — a "Claude worked" signal.
     fn ev(secs: i64, project: &str) -> WorkEvent {
         WorkEvent {
             ts: iso(secs),
@@ -522,6 +665,15 @@ mod tests {
             .map(|x| x.status)
     }
 
+    /// Presence of a given project's row (only the active row carries one).
+    fn presence_of(s: &Segmenter, project: &str) -> Option<Presence> {
+        s.snapshot()
+            .sessions
+            .into_iter()
+            .find(|x| x.project == project)
+            .and_then(|x| x.presence)
+    }
+
     fn projects(s: &Segmenter) -> Vec<String> {
         s.snapshot().sessions.into_iter().map(|x| x.project).collect()
     }
@@ -559,6 +711,8 @@ mod tests {
 
     #[test]
     fn sustained_transcript_evidence_confirms_switch() {
+        // No prompts here — waid opened on autonomous `Active`, so it's *running* and
+        // the debounce governs the switch (the no-hooks fallback path).
         let mut s = Segmenter::new(SegmentConfig::default());
         s.ingest(&ev(0, "waid"));
         s.ingest(&ev(30, "waid"));
@@ -594,6 +748,72 @@ mod tests {
         // waid is still a visible row, just no longer active.
         assert_eq!(status_of(&s, "waid"), Some(Status::Active));
         assert_eq!(projects(&s), vec!["waid", "whoami"]);
+    }
+
+    #[test]
+    fn session_start_in_new_project_switches_immediately() {
+        // Launching Claude in another project (a new transcript → SessionStart) is an
+        // explicit act — a "you acted" signal, so it switches like a prompt, no debounce.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "waid"));
+        s.ingest(&ev(30, "waid"));
+        let switch = s.ingest(&status_ev(40, "whoami", WorkKind::SessionStart));
+        let blocks = closed(&switch);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].project, "waid");
+        assert_eq!(opened(&switch), vec!["whoami"]);
+        assert_eq!(active(&s).as_deref(), Some("whoami"));
+        assert_eq!(presence_of(&s, "whoami"), Some(Presence::Present));
+    }
+
+    #[test]
+    fn present_block_protected_from_autonomous_switch() {
+        // You prompted waid (present). Claude then works autonomously on whoami for the
+        // whole attention-recency window — a present block is protected, so no candidate
+        // builds and there's no switch, no matter how much background work piles up.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt)); // present at t=0
+        // All whoami evidence within 120s of the prompt → waid stays present throughout.
+        s.ingest(&ev(30, "whoami"));
+        s.ingest(&ev(60, "whoami"));
+        let still = s.ingest(&ev(110, "whoami"));
+        assert!(closed(&still).is_empty() && opened(&still).is_empty());
+        assert_eq!(active(&s).as_deref(), Some("waid"));
+        assert_eq!(presence_of(&s, "waid"), Some(Presence::Present));
+        // whoami is a visible row but carries no presence (only the active row does).
+        assert_eq!(presence_of(&s, "whoami"), None);
+    }
+
+    #[test]
+    fn running_block_yields_to_autonomous_evidence() {
+        // You prompted waid at t=0, but past the attention-recency window it's *running*
+        // (only autonomous activity since). Sustained whoami evidence now builds a
+        // candidate and confirms a switch on the normal debounce.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        s.ingest(&ev(150, "waid")); // autonomous; past recency → waid now running
+        s.ingest(&ev(200, "whoami")); // candidate starts at 200
+        let confirm = s.ingest(&ev(295, "whoami")); // 295-200 = 95 >= 90 → switch
+        assert_eq!(opened(&confirm), vec!["whoami"]);
+        assert_eq!(active(&s).as_deref(), Some("whoami"));
+    }
+
+    #[test]
+    fn present_flips_to_running_after_recency() {
+        // A prompt opens a *present* block; once the attention-recency window lapses with
+        // no further act, a tick flips it to *running* and pushes a snapshot.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        assert_eq!(presence_of(&s, "waid"), Some(Presence::Present));
+        // Before the window lapses: still present, no snapshot churn.
+        assert!(s.tick(100).is_empty());
+        assert_eq!(presence_of(&s, "waid"), Some(Presence::Present));
+        // Past the window (and before idle): flips to running, emits a snapshot.
+        let eff = s.tick(200);
+        assert_eq!(eff, vec![Effect::SnapshotDirty]);
+        assert_eq!(presence_of(&s, "waid"), Some(Presence::Running));
+        // Still the active block — running keeps accruing time.
+        assert_eq!(active(&s).as_deref(), Some("waid"));
     }
 
     #[test]
@@ -748,24 +968,42 @@ mod tests {
     }
 
     #[test]
-    fn corroborating_evidence_never_drives_a_switch() {
-        // On waid (active). A terminal sitting in another repo fires `cd`s well past
-        // switch_min_seconds — focus must stay on waid (low-confidence can't switch), and
-        // the stray repo never even becomes a row.
+    fn weak_hint_drops_a_running_block_but_never_switches_to_it() {
+        // waid is active via autonomous transcript evidence → it's *running* (no prompt
+        // ever marked you present). A terminal sitting in another repo fires `cd`s: per §7
+        // a running block yields, so the first stray hint *drops* waid — but the stray
+        // repo still never becomes a row or the focus (a bare cwd is not focus, §1/§5.3).
         let mut s = Segmenter::new(SegmentConfig::default());
         s.ingest(&ev(0, "waid"));
-        for t in (30..400).step_by(30) {
+        let drop = s.ingest(&corrob_ev(30, "whoami"));
+        assert_eq!(closed(&drop).len(), 1);
+        assert_eq!(closed(&drop)[0].project, "waid");
+        assert_eq!(active(&s), None);
+        // Further stray hints do nothing — nothing active to drop, whoami still no row.
+        for t in (60..400).step_by(30) {
             let eff = s.ingest(&corrob_ev(t, "whoami"));
             assert!(closed(&eff).is_empty() && opened(&eff).is_empty());
         }
+        assert_eq!(projects(&s), vec!["waid"]); // waid's row lingers; whoami never appears
+    }
+
+    #[test]
+    fn present_block_is_not_dropped_by_weak_hint() {
+        // You prompted waid (present). A terminal `cd` into another repo must NOT drop it —
+        // only a *running* block yields to a weak hint; a present one is protected.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt)); // present
+        let eff = s.ingest(&corrob_ev(30, "whoami")); // within recency → still present
+        assert!(closed(&eff).is_empty());
         assert_eq!(active(&s).as_deref(), Some("waid"));
-        assert_eq!(projects(&s), vec!["waid"]);
+        assert_eq!(presence_of(&s, "waid"), Some(Presence::Present));
     }
 
     #[test]
     fn corroborating_evidence_does_not_cancel_a_real_candidate() {
         // A genuine switch is building (transcript evidence on whoami). A terminal `cd`
-        // back in waid must not veto it — primary signal stays in charge.
+        // back in waid must not veto it — primary signal stays in charge. (waid is running
+        // here — opened on autonomous `Active` — so its own corroboration just reinforces.)
         let mut s = Segmenter::new(SegmentConfig::default());
         s.ingest(&ev(0, "waid"));
         s.ingest(&ev(60, "whoami")); // candidate starts at 60
