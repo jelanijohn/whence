@@ -61,6 +61,20 @@ pub struct WorkEvent {
     pub surface: Surface,
     /// Resolved project slug; `None` = unattributed activity.
     pub project: Option<String>,
+    /// Stable per-instance source key *within* `(project, surface)` — the Claude Code
+    /// session UUID, a browser conversation URL, a terminal id. It's what lets one
+    /// project show three concurrent sessions as three source rows (§9) instead of one
+    /// blurred line. `None` when the surface can't tell its instances apart (a terminal
+    /// with no id, Ollama liveness); then all that surface's activity on the project
+    /// folds into a single source. Opaque to the engine — only equality/grouping matter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Human label for the source row (`"chatgpt web"`, `"claude web"`). `None` → the
+    /// engine falls back to the surface name (`"terminal"`, `"claude code"`) and numbers
+    /// duplicates. Only the browser adapter sets this today (to carry the provider, which
+    /// the bare `Browser` surface can't).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
     pub kind: WorkKind,
     /// 0..1 — cwd-derived ~1.0, temporal-correlation ~0.4.
     pub confidence: f64,
@@ -180,6 +194,8 @@ mod tests {
             ts: "2026-06-24T15:00:00Z".into(),
             surface: Surface::ClaudeCode,
             project: Some("waid".into()),
+            source: None,
+            source_label: None,
             kind: WorkKind::Prompt,
             confidence: 1.0,
             detail: None,

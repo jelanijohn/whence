@@ -240,13 +240,34 @@ pub fn event_for(
     } else {
         WorkKind::AwaitingInput
     };
+    let (source, source_label) = match p.url.as_deref() {
+        // The conversation URL is the per-session source key (one row per chat); the
+        // host's provider gives the human label ("claude web" / "chatgpt web") that the
+        // bare `Browser` surface can't carry.
+        Some(url) => (
+            Some(normalize_url(url)),
+            host_of(url).and_then(|h| provider_for_host(&h)).map(source_label_for),
+        ),
+        None => (None, None),
+    };
     WorkEvent {
         ts: now_rfc3339.to_string(),
         surface: Surface::Browser,
         project: Some(slug),
+        source,
+        source_label,
         kind,
         confidence: 1.0, // self-attributed from the provider's own project identity (§2)
         detail: p.url.clone().map(|u| format!("browser: {u}")),
+    }
+}
+
+/// Map a provider id to its source-row label.
+fn source_label_for(provider: &str) -> String {
+    match provider {
+        "claude" => "claude web".to_string(),
+        "chatgpt" => "chatgpt web".to_string(),
+        other => format!("{other} web"),
     }
 }
 
@@ -476,6 +497,23 @@ urls                  = ["https://claude.ai/project/proj_abc"]
         assert_eq!(ev.confidence, 1.0);
         assert_eq!(ev.ts, NOW);
         assert_eq!(ev.detail.as_deref(), Some("browser: https://claude.ai/project/x"));
+    }
+
+    #[test]
+    fn event_carries_conversation_source_and_provider_label() {
+        let mut p = payload();
+        p.url = Some("https://chatgpt.com/c/abc?ref=1".into());
+        p.streaming = Some(true);
+        let ev = event_for("whence".into(), &p, None, NOW);
+        // The normalized conversation URL is the per-session source key; the host gives
+        // the human label the bare `Browser` surface can't carry.
+        assert_eq!(ev.source.as_deref(), Some("https://chatgpt.com/c/abc"));
+        assert_eq!(ev.source_label.as_deref(), Some("chatgpt web"));
+
+        let mut claude = payload();
+        claude.url = Some("https://claude.ai/project/x".into());
+        let ev = event_for("whence".into(), &claude, None, NOW);
+        assert_eq!(ev.source_label.as_deref(), Some("claude web"));
     }
 
     #[test]

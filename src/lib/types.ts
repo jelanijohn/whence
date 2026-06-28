@@ -21,6 +21,8 @@ export interface WorkEvent {
   ts: string; // ISO-8601
   surface: Surface;
   project: string | null; // resolved slug; null = unattributed
+  source?: string | null; // stable per-instance source key within (project, surface)
+  source_label?: string | null; // display hint (e.g. "chatgpt web"); null = use surface
   kind: WorkKind;
   confidence: number; // 0..1
   detail?: string | null;
@@ -56,20 +58,31 @@ export interface FocusBlock {
   meanConfidence: number;
 }
 
-// One live session row — one per project. The widget renders all of them; only the
-// `active` one drives the NeuroSkill label + timeline (attribution stays single).
-export interface SessionSnapshot {
-  project: string;
+// One live source under a project row — a single Claude Code session, browser
+// conversation, or terminal (§9). Revealed when a project row is expanded.
+export interface SourceSnapshot {
+  surface: Surface;
+  label: string; // display label; numbered ("terminal 1") when a kind repeats
   status: Status;
-  blockStart: number | null; // unix seconds; the row timer counts from here
+  statusSince: number; // unix seconds; the source's time-in-status timer base
+}
+
+// One project row in the roster (§9) — one per project with a live/recent source.
+// The widget renders all of them; only the `active` one drives the NeuroSkill label +
+// timeline (attribution stays single). Its `sources` are the per-session breakdown.
+export interface ProjectSnapshot {
+  project: string;
+  status: Status; // attention-priority roll-up of the sources' statuses
+  statusSince: number | null; // unix seconds; the row timer counts from here
   active: boolean; // the single focused project
   presence: Presence | null; // set only on the active row (§7); null otherwise
+  sources: SourceSnapshot[];
 }
 
 // The live snapshot the widget renders, pushed on the `whence://focus` event and
-// returned by the get_focus_state command. Empty `sessions` = idle / nothing live.
+// returned by the get_focus_state command. Empty `projects` = idle / nothing live.
 export interface FocusSnapshot {
-  sessions: SessionSnapshot[];
+  projects: ProjectSnapshot[];
 }
 
 export interface Settings {

@@ -8,11 +8,13 @@
 //! event `ts` or the explicit `now` passed to [`Segmenter::tick`]. That keeps it
 //! deterministic: feed it a `WorkEvent` sequence, assert the blocks.
 //!
-//! **Multi-session (per project).** Whence tracks every live project at once — one
-//! `SessionState` row per project — but keeps a *single* `active` project for
-//! attribution. The widget shows all rows (each with its own status + timer); only
-//! the active project drives the NeuroSkill label and the `timeline.jsonl` blocks,
-//! so the persisted attribution stays single-stream and non-overlapping.
+//! **Per-project registry (§7/§9).** Whence tracks every live project at once as a
+//! [`ProjectState`], and within each, every live **source** (Claude Code session,
+//! browser conversation, terminal) keyed by [`source_key`]. The widget renders this
+//! as a roster: one row per project (status rolled up by attention priority), each
+//! expandable to its sources. Attribution stays single-stream, though — a *single*
+//! `active` project drives the NeuroSkill label and the `timeline.jsonl` blocks, so
+//! persisted blocks never overlap. The source breakdown is display-only.
 //!
 //! ## The three-tier trust model (§7)
 //!
@@ -53,11 +55,11 @@
 //! * **Status changes** (`active`/`awaiting_input`/`idle`) land on a session row
 //!   immediately and never move a block boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::{WorkEvent, WorkKind};
+use crate::adapters::{Surface, WorkEvent, WorkKind};
 
 /// Tunables (surfaced in settings; calibrate the debounce on real data).
 #[derive(Debug, Clone, Copy)]
@@ -133,25 +135,47 @@ pub struct FocusBlock {
     pub mean_confidence: f64,
 }
 
-/// One live session row, as rendered by the widget. One per project.
+/// One live **source** under a project row — a single Claude Code session, browser
+/// conversation, or terminal. A project with three concurrent sessions renders as
+/// three of these under one [`ProjectSnapshot`] (§9), each with its own status + timer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionSnapshot {
-    pub project: String,
+pub struct SourceSnapshot {
+    pub surface: Surface,
+    /// Display label — the adapter's `source_label` (`"chatgpt web"`) or the surface
+    /// name, numbered when a project has several of the same kind (`"terminal 1"`).
+    pub label: String,
     pub status: Status,
-    /// When this session's row/block began — drives the row timer. Unix seconds.
-    #[serde(rename = "blockStart")]
-    pub block_start: Option<i64>,
+    /// When this source entered its current status — drives the source's state timer
+    /// (time-in-status, §9). Unix seconds.
+    #[serde(rename = "statusSince")]
+    pub status_since: i64,
+}
+
+/// One project row in the roster (§9). One per project that currently has a live or
+/// recently-live source. Carries the project's rolled-up status + the focus marker;
+/// the per-source breakdown is in `sources` (revealed when the row is expanded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSnapshot {
+    pub project: String,
+    /// Attention-priority roll-up of the sources' statuses (ACTIVE > AWAITING > IDLE).
+    pub status: Status,
+    /// When the project entered its current rolled-up status — drives the row's
+    /// state timer (time-in-status, §9). `None` only if the project has no sources.
+    #[serde(rename = "statusSince")]
+    pub status_since: Option<i64>,
     /// Is this the single focused project (drives the NeuroSkill label + timeline)?
     pub active: bool,
     /// Present vs running — set only on the `active` row (§7); `None` otherwise.
     pub presence: Option<Presence>,
+    /// The project's live sources, ordered oldest-first (stable; for the expand view).
+    pub sources: Vec<SourceSnapshot>,
 }
 
-/// What the widget renders right now: every live session. Empty = idle / nothing
-/// attributed.
+/// What the widget renders right now: every live project as a roster row. Empty =
+/// idle / nothing attributed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FocusSnapshot {
-    pub sessions: Vec<SessionSnapshot>,
+    pub projects: Vec<ProjectSnapshot>,
 }
 
 /// Side effects the orchestrator acts on: write NeuroSkill labels, persist blocks,
@@ -167,15 +191,134 @@ pub enum Effect {
     BlockClosed(FocusBlock),
 }
 
-/// Per-project display state: when the row started, when it last showed life, and
-/// its current status. Attribution accounting (event counts) lives on the
-/// `Segmenter` for the single active project, not here — non-active rows are
-/// display-only.
+/// Per-**source** display state: one live session/conversation/terminal. Attribution
+/// accounting (event counts) lives on the `Segmenter` for the single active project,
+/// not here — sources are display-only.
 #[derive(Debug, Clone)]
-struct SessionState {
+struct SourceState {
+    surface: Surface,
+    /// Adapter-supplied label hint (`source_label`); `None` → fall back to the surface
+    /// name. Numbering of duplicates happens at snapshot time, not here.
+    label: Option<String>,
     start: i64,
     last_activity: i64,
     status: Status,
+    /// When the current status began — the source's time-in-status timer base.
+    status_since: i64,
+}
+
+impl SourceState {
+    /// The un-numbered display label: the adapter hint, else the surface name.
+    fn base_label(&self) -> String {
+        self.label
+            .clone()
+            .unwrap_or_else(|| surface_label(self.surface).to_string())
+    }
+}
+
+/// Per-project display state: the set of live sources under one project, keyed by
+/// [`source_key`]. The project's status/timer are *derived* from its sources (a
+/// roll-up), so nothing here duplicates source state.
+#[derive(Debug, Clone)]
+struct ProjectState {
+    sources: BTreeMap<String, SourceState>,
+}
+
+impl ProjectState {
+    fn new() -> Self {
+        Self { sources: BTreeMap::new() }
+    }
+
+    /// The most recent activity across all sources — the project's liveness for the
+    /// idle/block-close logic. `None` if it somehow has no sources.
+    fn last_activity(&self) -> Option<i64> {
+        self.sources.values().map(|s| s.last_activity).max()
+    }
+
+    /// Attention-priority roll-up: ACTIVE beats AWAITING beats IDLE (§9 ordering).
+    fn rolled_status(&self) -> Status {
+        self.sources
+            .values()
+            .map(|s| s.status)
+            .max_by_key(|st| status_rank(*st))
+            .unwrap_or(Status::Idle)
+    }
+
+    /// Time-in-status base for the row timer: the oldest `status_since` among the
+    /// sources currently showing the rolled-up status. `None` if there are no sources.
+    fn status_since_for(&self, status: Status) -> Option<i64> {
+        self.sources
+            .values()
+            .filter(|s| s.status == status)
+            .map(|s| s.status_since)
+            .min()
+    }
+
+    /// Render the sources oldest-first, numbering duplicates of the same base label
+    /// (`terminal 1`, `terminal 2`) so concurrent same-kind sessions read distinctly.
+    fn source_snapshots(&self) -> Vec<SourceSnapshot> {
+        let mut srcs: Vec<&SourceState> = self.sources.values().collect();
+        srcs.sort_by(|a, b| a.start.cmp(&b.start).then(a.base_label().cmp(&b.base_label())));
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for s in &srcs {
+            *counts.entry(s.base_label()).or_default() += 1;
+        }
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        srcs.into_iter()
+            .map(|s| {
+                let base = s.base_label();
+                let label = if counts[&base] > 1 {
+                    let n = seen.entry(base.clone()).or_insert(0);
+                    *n += 1;
+                    format!("{base} {n}")
+                } else {
+                    base
+                };
+                SourceSnapshot {
+                    surface: s.surface,
+                    label,
+                    status: s.status,
+                    status_since: s.status_since,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Attention-priority rank for the status roll-up + ordering (§9): higher wins.
+fn status_rank(s: Status) -> u8 {
+    match s {
+        Status::Active => 2,
+        Status::AwaitingInput => 1,
+        Status::Idle => 0,
+    }
+}
+
+/// Surface → its default un-numbered source label (used when the adapter gives no
+/// `source_label`). Kebab is for keying ([`source_key`]); this is the human form.
+fn surface_label(s: Surface) -> &'static str {
+    match s {
+        Surface::ClaudeCode => "claude code",
+        Surface::Ollama => "ollama",
+        Surface::Terminal => "terminal",
+        Surface::ClaudeDesktop => "claude desktop",
+        Surface::Browser => "browser",
+    }
+}
+
+/// Stable key for a source *within a project*: its surface plus the adapter's
+/// per-instance `source` id (the CC session UUID, browser URL, terminal id). When the
+/// surface gives no id, all its activity on a project folds onto one key (one row).
+/// Uses a unit-separator the ids never contain, so distinct surfaces/ids never collide.
+fn source_key(ev: &WorkEvent) -> String {
+    let tag = match ev.surface {
+        Surface::ClaudeCode => "claude-code",
+        Surface::Ollama => "ollama",
+        Surface::Terminal => "terminal",
+        Surface::ClaudeDesktop => "claude-desktop",
+        Surface::Browser => "browser",
+    };
+    format!("{tag}\u{1f}{}", ev.source.as_deref().unwrap_or(""))
 }
 
 /// Evidence accumulating for a project that *might* become the new active focus via
@@ -194,7 +337,8 @@ struct Candidate {
 pub struct Segmenter {
     config: SegmentConfig,
     /// Every live project, keyed by slug. `BTreeMap` → stable (alphabetical) order.
-    sessions: BTreeMap<String, SessionState>,
+    /// Each holds its own set of live sources (§9).
+    projects: BTreeMap<String, ProjectState>,
     /// The single focused project, if any — the attribution target.
     active: Option<String>,
     /// When `active` became the focused project; the open block spans
@@ -219,7 +363,7 @@ impl Segmenter {
     pub fn new(config: SegmentConfig) -> Self {
         Self {
             config,
-            sessions: BTreeMap::new(),
+            projects: BTreeMap::new(),
             active: None,
             active_since: None,
             active_last_prompt: None,
@@ -233,17 +377,19 @@ impl Segmenter {
     pub fn snapshot(&self) -> FocusSnapshot {
         let active = self.active.as_deref();
         FocusSnapshot {
-            sessions: self
-                .sessions
+            projects: self
+                .projects
                 .iter()
-                .map(|(project, s)| {
+                .map(|(project, p)| {
                     let is_active = active == Some(project.as_str());
-                    SessionSnapshot {
+                    let status = p.rolled_status();
+                    ProjectSnapshot {
                         project: project.clone(),
-                        status: s.status,
-                        block_start: Some(s.start),
+                        status,
+                        status_since: p.status_since_for(status),
                         active: is_active,
                         presence: if is_active { self.active_presence } else { None },
+                        sources: p.source_snapshots(),
                     }
                 })
                 .collect(),
@@ -297,17 +443,31 @@ impl Segmenter {
         let mut effects = Vec::new();
         let mut dirty = false;
 
-        // SessionEnd closes the row outright (and the block, if it was active).
+        // SessionEnd closes the *source* that ended. The project (and its block, if
+        // active) only goes away once its last source is gone — another live session on
+        // the same project keeps it attributed.
         if matches!(ev.kind, WorkKind::SessionEnd) {
-            if self.active.as_deref() == Some(project.as_str()) {
-                if let Some(closed) = self.close_active() {
-                    effects.push(closed);
+            let key = source_key(ev);
+            let now_empty = {
+                let Some(proj) = self.projects.get_mut(&project) else {
+                    return finish(effects, dirty);
+                };
+                if proj.sources.remove(&key).is_some() {
+                    dirty = true;
                 }
+                proj.sources.is_empty()
+            };
+            if now_empty {
+                // Close while the (now sourceless) project is still in the map so the
+                // block ends at its last activity, then drop the project.
+                if self.active.as_deref() == Some(project.as_str()) {
+                    if let Some(closed) = self.close_active() {
+                        effects.push(closed);
+                    }
+                }
+                self.projects.remove(&project);
+                self.clear_candidate_for(&project);
             }
-            if self.sessions.remove(&project).is_some() {
-                dirty = true;
-            }
-            self.clear_candidate_for(&project);
             return finish(effects, dirty);
         }
 
@@ -319,11 +479,36 @@ impl Segmenter {
         // so it drops the running block (§7 "a running block yields easily"). Even then
         // it never *opens* the weak project — whatever real evidence comes next does.
         if self.is_weak(ev) {
-            if let Some(s) = self.sessions.get_mut(&project) {
-                s.last_activity = ts;
-                if s.status == Status::Idle {
-                    s.status = Status::Active; // a weak nudge lifts idle, never overrides awaiting.
-                    dirty = true;
+            // A weak hint may reinforce an existing project, never *originate* one (a bare
+            // cwd isn't focus, §1/§5.3). Under a project that's already attributed, though,
+            // it upserts its own source row — a terminal you actually have open on that repo
+            // is honest to show (§9); a `cd` into an unattributed repo still creates nothing.
+            if self.projects.contains_key(&project) {
+                let key = source_key(ev);
+                let proj = self.projects.get_mut(&project).unwrap();
+                match proj.sources.get_mut(&key) {
+                    Some(s) => {
+                        s.last_activity = ts;
+                        if s.status == Status::Idle {
+                            s.status = Status::Active; // lifts idle, never overrides awaiting.
+                            s.status_since = ts;
+                            dirty = true;
+                        }
+                    }
+                    None => {
+                        proj.sources.insert(
+                            key,
+                            SourceState {
+                                surface: ev.surface,
+                                label: ev.source_label.clone(),
+                                start: ts,
+                                last_activity: ts,
+                                status: Status::Active,
+                                status_since: ts,
+                            },
+                        );
+                        dirty = true;
+                    }
                 }
                 if self.active.as_deref() == Some(project.as_str()) {
                     self.active_event_count += 1;
@@ -353,6 +538,7 @@ impl Segmenter {
                 | WorkKind::Active
                 | WorkKind::AwaitingInput
         );
+        let key = source_key(ev);
         let desired = match ev.kind {
             WorkKind::AwaitingInput => Some(Status::AwaitingInput),
             WorkKind::Idle => Some(Status::Idle),
@@ -362,7 +548,7 @@ impl Segmenter {
             // awaiting_input, then the trailing end-of-turn transcript write lands a
             // beat later as a generic `Active`; without this guard it clobbers
             // awaiting_input straight back to active and "awaiting you" is never seen.
-            WorkKind::Active => match self.sessions.get(&project) {
+            WorkKind::Active => match self.projects.get(&project).and_then(|p| p.sources.get(&key)) {
                 Some(s) if s.status == Status::AwaitingInput => None,
                 _ => Some(Status::Active),
             },
@@ -370,34 +556,42 @@ impl Segmenter {
         };
 
         if live_signal {
-            match self.sessions.get_mut(&project) {
+            let proj = self.projects.entry(project.clone()).or_insert_with(ProjectState::new);
+            match proj.sources.get_mut(&key) {
                 Some(s) => {
                     s.last_activity = ts;
                     if let Some(st) = desired {
                         if s.status != st {
                             s.status = st;
+                            s.status_since = ts;
                             dirty = true;
                         }
                     }
                 }
                 None => {
-                    self.sessions.insert(
-                        project.clone(),
-                        SessionState {
+                    proj.sources.insert(
+                        key.clone(),
+                        SourceState {
+                            surface: ev.surface,
+                            label: ev.source_label.clone(),
                             start: ts,
                             last_activity: ts,
                             status: desired.unwrap_or(Status::Active),
+                            status_since: ts,
                         },
                     );
                     dirty = true;
                 }
             }
-        } else if let Some(s) = self.sessions.get_mut(&project) {
-            // Idle for a tracked project: mark it idle, but don't refresh activity
+        } else if let Some(s) =
+            self.projects.get_mut(&project).and_then(|p| p.sources.get_mut(&key))
+        {
+            // Idle for a tracked source: mark it idle, but don't refresh activity
             // (idle means *no* activity — let the idle-row timeout run).
             if let Some(st) = desired {
                 if s.status != st {
                     s.status = st;
+                    s.status_since = ts;
                     dirty = true;
                 }
             }
@@ -490,9 +684,8 @@ impl Segmenter {
         // stops). The row itself stays (now a quiet "idle" row) until it's dropped.
         if let Some(active) = self.active.clone() {
             let stale = self
-                .sessions
-                .get(&active)
-                .map(|s| now - s.last_activity >= idle)
+                .project_last_activity(&active)
+                .map(|la| now - la >= idle)
                 .unwrap_or(true);
             if stale {
                 if let Some(closed) = self.close_active() {
@@ -501,20 +694,32 @@ impl Segmenter {
             }
         }
 
-        // Per-row idle/drop sweep.
-        let mut to_drop = Vec::new();
-        for (project, s) in self.sessions.iter_mut() {
-            let quiet = now - s.last_activity;
-            if quiet >= idle * IDLE_ROW_LINGER_MULT {
-                to_drop.push(project.clone());
-            } else if quiet >= idle && s.status != Status::Idle {
-                s.status = Status::Idle;
+        // Per-source idle/drop sweep: each source idles (then drops) on its own clock; a
+        // project disappears once its last source is gone.
+        let mut empty_projects = Vec::new();
+        for (slug, proj) in self.projects.iter_mut() {
+            let mut drop_sources = Vec::new();
+            for (key, s) in proj.sources.iter_mut() {
+                let quiet = now - s.last_activity;
+                if quiet >= idle * IDLE_ROW_LINGER_MULT {
+                    drop_sources.push(key.clone());
+                } else if quiet >= idle && s.status != Status::Idle {
+                    s.status = Status::Idle;
+                    s.status_since = now;
+                    dirty = true;
+                }
+            }
+            for key in drop_sources {
+                proj.sources.remove(&key);
                 dirty = true;
             }
+            if proj.sources.is_empty() {
+                empty_projects.push(slug.clone());
+            }
         }
-        for project in to_drop {
-            self.sessions.remove(&project);
-            self.clear_candidate_for(&project);
+        for slug in empty_projects {
+            self.projects.remove(&slug);
+            self.clear_candidate_for(&slug);
             dirty = true;
         }
 
@@ -554,11 +759,7 @@ impl Segmenter {
     fn close_active(&mut self) -> Option<Effect> {
         let project = self.active.take()?;
         let start = self.active_since.take().unwrap_or(0);
-        let end = self
-            .sessions
-            .get(&project)
-            .map(|s| s.last_activity)
-            .unwrap_or(start);
+        let end = self.project_last_activity(&project).unwrap_or(start);
         let block = FocusBlock {
             project,
             start,
@@ -575,6 +776,12 @@ impl Segmenter {
         self.active_last_prompt = None;
         self.active_presence = None;
         Some(Effect::BlockClosed(block))
+    }
+
+    /// Most recent activity across a project's sources — the project's liveness for the
+    /// idle/block-close logic. `None` if the project isn't tracked (or has no sources).
+    fn project_last_activity(&self, project: &str) -> Option<i64> {
+        self.projects.get(project).and_then(|p| p.last_activity())
     }
 
     fn clear_candidate_for(&mut self, project: &str) {
@@ -605,6 +812,8 @@ mod tests {
             ts: iso(secs),
             surface: Surface::ClaudeCode,
             project: Some(project.to_string()),
+            source: None,
+            source_label: None,
             kind: WorkKind::Active,
             confidence: 1.0,
             detail: None,
@@ -616,6 +825,8 @@ mod tests {
             ts: iso(secs),
             surface: Surface::ClaudeCode,
             project: Some(project.to_string()),
+            source: None,
+            source_label: None,
             kind,
             confidence: 1.0,
             detail: None,
@@ -650,16 +861,16 @@ mod tests {
     /// The active project in the snapshot, if any.
     fn active(s: &Segmenter) -> Option<String> {
         s.snapshot()
-            .sessions
+            .projects
             .into_iter()
             .find(|x| x.active)
             .map(|x| x.project)
     }
 
-    /// Status of a given project's row, if it exists.
+    /// Rolled-up status of a given project's row, if it exists.
     fn status_of(s: &Segmenter, project: &str) -> Option<Status> {
         s.snapshot()
-            .sessions
+            .projects
             .into_iter()
             .find(|x| x.project == project)
             .map(|x| x.status)
@@ -668,14 +879,24 @@ mod tests {
     /// Presence of a given project's row (only the active row carries one).
     fn presence_of(s: &Segmenter, project: &str) -> Option<Presence> {
         s.snapshot()
-            .sessions
+            .projects
             .into_iter()
             .find(|x| x.project == project)
             .and_then(|x| x.presence)
     }
 
     fn projects(s: &Segmenter) -> Vec<String> {
-        s.snapshot().sessions.into_iter().map(|x| x.project).collect()
+        s.snapshot().projects.into_iter().map(|x| x.project).collect()
+    }
+
+    /// The source labels under a given project's row, in snapshot order.
+    fn source_labels(s: &Segmenter, project: &str) -> Vec<String> {
+        s.snapshot()
+            .projects
+            .into_iter()
+            .find(|x| x.project == project)
+            .map(|x| x.sources.into_iter().map(|src| src.label).collect())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -931,6 +1152,8 @@ mod tests {
             ts: iso(secs),
             surface: Surface::Terminal,
             project: Some(project.to_string()),
+            source: None,
+            source_label: None,
             kind: WorkKind::Active,
             confidence: 0.4,
             detail: None,
@@ -951,13 +1174,17 @@ mod tests {
     #[test]
     fn corroborating_evidence_extends_matching_active_block() {
         // On waid (active), then only terminal `cd`s within waid for a long stretch. The
-        // corroboration keeps the block alive past what idle_timeout would close.
+        // corroboration keeps the *block* alive past what idle_timeout would close — the
+        // project's last activity is the max across its sources, and the terminal bumps it.
         let mut s = Segmenter::new(SegmentConfig::default());
         s.ingest(&ev(0, "waid"));
         s.ingest(&corrob_ev(300, "waid"));
-        // A tick just after the original last_activity+timeout would have closed it, but
-        // corroboration at t=300 pushed last_activity forward.
-        assert!(s.tick(361).is_empty(), "corroboration should hold the block open");
+        // waid now has two sources: the (idling) Claude Code session and the live terminal.
+        assert_eq!(source_labels(&s, "waid"), vec!["claude code", "terminal"]);
+        // A tick just after the Claude Code source's own timeout: that source goes idle,
+        // but the terminal at t=300 holds the block open (no close).
+        let eff = s.tick(361);
+        assert!(closed(&eff).is_empty(), "corroboration should hold the block open");
         assert_eq!(active(&s).as_deref(), Some("waid"));
         // The corroborating event is folded into the block's evidence (dragging the mean
         // confidence down, honestly reflecting the weaker signal).
@@ -1026,5 +1253,84 @@ mod tests {
         let b = &closed(&eff)[0];
         assert_eq!(b.event_count, 2);
         assert!((b.mean_confidence - 0.7).abs() < 1e-9);
+    }
+
+    /// A focus-evidence event with an explicit per-instance `source` id (and optional
+    /// label) — the §9 multi-source path.
+    fn ev_src(secs: i64, project: &str, source: &str, label: Option<&str>) -> WorkEvent {
+        WorkEvent {
+            ts: iso(secs),
+            surface: Surface::ClaudeCode,
+            project: Some(project.to_string()),
+            source: Some(source.to_string()),
+            source_label: label.map(str::to_string),
+            kind: WorkKind::Active,
+            confidence: 1.0,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn two_sessions_on_one_project_are_two_numbered_sources() {
+        // Two concurrent Claude Code sessions in the same repo → one project row with two
+        // source rows, numbered by start order (§9: "three sessions read as three rows").
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev_src(0, "whence", "sess-a", None));
+        s.ingest(&ev_src(10, "whence", "sess-b", None));
+        // Still a single project in the roster...
+        assert_eq!(projects(&s), vec!["whence"]);
+        // ...but two distinct, numbered source rows under it.
+        assert_eq!(source_labels(&s, "whence"), vec!["claude code 1", "claude code 2"]);
+        // A repeat on the first session stays one row (same source key), no third row.
+        s.ingest(&ev_src(20, "whence", "sess-a", None));
+        assert_eq!(source_labels(&s, "whence"), vec!["claude code 1", "claude code 2"]);
+    }
+
+    #[test]
+    fn distinct_surfaces_keep_their_own_labels_unnumbered() {
+        // A Claude Code session and a browser chat on the same project: different base
+        // labels → no numbering, each shown as itself (§9 "claude code", "chatgpt web").
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev_src(0, "whence", "sess-a", None));
+        let mut browser = ev_src(10, "whence", "https://chatgpt.com/c/1", Some("chatgpt web"));
+        browser.surface = Surface::Browser;
+        s.ingest(&browser);
+        assert_eq!(source_labels(&s, "whence"), vec!["claude code", "chatgpt web"]);
+    }
+
+    #[test]
+    fn project_status_rolls_up_by_attention_priority() {
+        // Two sources on one project: one awaiting you, one actively working. The project
+        // row rolls up to the highest-priority status (ACTIVE > AWAITING > IDLE, §9).
+        let mut s = Segmenter::new(SegmentConfig::default());
+        let mut a = ev_src(0, "whence", "sess-a", None);
+        a.kind = WorkKind::AwaitingInput; // session A awaiting you
+        s.ingest(&a);
+        assert_eq!(status_of(&s, "whence"), Some(Status::AwaitingInput));
+        s.ingest(&ev_src(10, "whence", "sess-b", None)); // session B active
+        assert_eq!(status_of(&s, "whence"), Some(Status::Active));
+    }
+
+    #[test]
+    fn ending_one_session_keeps_the_project_alive_for_the_other() {
+        // Two sessions on whence; one ends. The project (and its block) survives on the
+        // remaining session — SessionEnd drops a *source*, not the whole project.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev_src(0, "whence", "sess-a", None)); // opens the block
+        s.ingest(&ev_src(10, "whence", "sess-b", None));
+        let mut end_a = ev_src(20, "whence", "sess-a", None);
+        end_a.kind = WorkKind::SessionEnd;
+        let eff = s.ingest(&end_a);
+        // No block closed — whence is still live via sess-b.
+        assert!(closed(&eff).is_empty());
+        assert_eq!(active(&s).as_deref(), Some("whence"));
+        assert_eq!(source_labels(&s, "whence"), vec!["claude code"]); // only sess-b left
+        // Ending the last session closes the block and drops the project.
+        let mut end_b = ev_src(30, "whence", "sess-b", None);
+        end_b.kind = WorkKind::SessionEnd;
+        let eff = s.ingest(&end_b);
+        assert_eq!(closed(&eff).len(), 1);
+        assert!(projects(&s).is_empty());
+        assert_eq!(active(&s), None);
     }
 }

@@ -90,6 +90,8 @@ fn liveness_event(resp: &PsResponse) -> WorkEvent {
         ts: chrono::Utc::now().to_rfc3339(),
         surface: Surface::Ollama,
         project: None, // never attributes — liveness only
+        source: None,  // unattributed → never becomes a source row
+        source_label: None,
         kind: WorkKind::Active,
         confidence: LIVENESS_CONFIDENCE,
         detail: (!models.is_empty()).then(|| format!("ollama: {}", models.join(", "))),

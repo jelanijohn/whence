@@ -92,6 +92,12 @@ fn event_for_path(
         ts: chrono::Utc::now().to_rfc3339(),
         surface: Surface::ClaudeCode,
         project,
+        // The transcript file stem *is* the Claude Code session UUID (the file is
+        // `<session_id>.jsonl`), so it's a stable per-session source key — and it matches
+        // what the hooks receiver derives from `transcript_path`, so the two CC surfaces
+        // agree on which source a session is.
+        source: path.file_stem().and_then(|s| s.to_str()).map(str::to_string),
+        source_label: None, // engine labels it "claude code"
         kind: if is_create {
             WorkKind::SessionStart
         } else {
@@ -178,6 +184,8 @@ mod tests {
         assert_eq!(ev.surface, Surface::ClaudeCode);
         assert_eq!(ev.kind, WorkKind::Active);
         assert_eq!(ev.confidence, 1.0);
+        // The transcript file stem is the per-session source key (the session UUID).
+        assert_eq!(ev.source.as_deref(), Some("abc123"));
     }
 
     #[test]

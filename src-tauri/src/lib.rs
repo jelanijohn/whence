@@ -48,7 +48,7 @@ pub fn run() {
 
             let loaded = settings::load(&data_dir);
             let shared: orchestrator::SharedSnapshot =
-                Arc::new(Mutex::new(FocusSnapshot { sessions: Vec::new() }));
+                Arc::new(Mutex::new(FocusSnapshot { projects: Vec::new() }));
             let settings_state = Arc::new(Mutex::new(loaded.clone()));
             let neuroskill_status: neuroskill::health::SharedStatus =
                 Arc::new(Mutex::new(neuroskill::health::NeuroskillStatus::default()));

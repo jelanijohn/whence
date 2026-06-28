@@ -52,6 +52,15 @@ surfaces to the widget *immediately* and never moves a block boundary, so the
 widget can light up the instant Claude Code is waiting on you without risking a
 false switch.
 
+Whence tracks *every* live project at once, not only the focused one. The widget
+is a **roster**: one row per project — status rolled up by attention priority
+(active → awaiting you → idle), the focus project pinned on top — and each row
+expands to its live **sources**, so a project with three concurrent sessions reads
+as three lines (each Claude Code session, browser conversation, or terminal, with
+its own status and timer) rather than one blurred row. Only the single focused
+project is *attributed*, though — it alone drives the NeuroSkill label and the
+timeline, so persisted blocks never overlap.
+
 ---
 
 ## Architecture
@@ -61,13 +70,14 @@ src/                          SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4
   routes/                       +layout · the widget view (+page.svelte).
   lib/
     tauri.ts                    The only place naming backend commands + events.
-    types.ts                    WorkEvent / FocusBlock / FocusSnapshot / Settings
-                                  — mirrors the Rust serde reps field-for-field.
+    types.ts                    WorkEvent / FocusBlock / ProjectSnapshot +
+                                  SourceSnapshot / FocusSnapshot / Settings — mirrors
+                                  the Rust serde reps field-for-field.
     stores/                     Focus + NeuroSkill-connection state (runes), each
                                   fed by its event (focus · neuroskill).
-    components/                 FocusBadge · StatusDot · SessionRow · BlockTimer ·
-                                  BlockTimeline · IntensityMeter · NeuroskillStatusDot
-                                  · SettingsPanel · Toggle · BrandMark.
+    components/                 FocusBadge · StatusDot · ProjectRow · SourceRow ·
+                                  BlockTimer · BlockTimeline · IntensityMeter ·
+                                  NeuroskillStatusDot · SettingsPanel · Toggle · BrandMark.
 src-tauri/src/
   lib.rs                        Plugin + command + window registration; spawns core.
   commands.rs                   get_focus_state · get_today_blocks ·
@@ -77,7 +87,8 @@ src-tauri/src/
   orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
   settings.rs                   Tiny JSON settings file in the app data dir.
   adapters/
-    mod.rs                      WorkEvent model + adapter contract + shared slugify.
+    mod.rs                      WorkEvent model (incl. per-instance source id) +
+                                  adapter contract + shared slugify.
     claude_code.rs              Transcript watch (a live surface) + slug resolve.
     hooks.rs                    Loopback receiver for Claude Code http hooks —
                                   live awaiting_input status. PURE event mapping.
@@ -89,7 +100,8 @@ src-tauri/src/
                                   originating-capable LLM-session attribution.
     browser_map.rs              Provider→slug mapping store (format-preserving TOML).
   engine/
-    segment.rs                  Debounce / switch confirmation / blocks — PURE,
+    segment.rs                  Per-project registry (sources per project) +
+                                  debounce / switch confirmation / blocks — PURE,
                                   fixture-tested: no I/O, every time comes in via
                                   the event or an explicit `now`.
     timeline.rs                 Local store: JSONL, one focus block per line.
@@ -127,10 +139,12 @@ the single status enum it can only show the widget as `active` with no project, 
 you enable it via the `ollama` setting only if you want the bare liveness signal.
 
 **Terminal cwd** (`terminal.rs`) is a *corroborator*, not an attribution source. A
-one-line shell hook POSTs `{"cwd": "$PWD"}` to a loopback `tiny_http` listener
-(default `127.0.0.1:18451`, override via `terminal_listen_addr_override`) on each
-directory change; the adapter resolves the cwd to a slug (alias map, then the
-lossless basename) and emits a low-confidence `active` event. Low confidence is
+one-line shell hook POSTs `{"cwd": "$PWD", "id": "$$"}` to a loopback `tiny_http`
+listener (default `127.0.0.1:18451`, override via `terminal_listen_addr_override`)
+on each directory change; the adapter resolves the cwd to a slug (alias map, then
+the lossless basename) and emits a low-confidence `active` event. The optional `id`
+(the shell PID) is the per-terminal source key, so two shells in one repo read as
+two source rows; omitting it folds all terminals on a project into one. Low confidence is
 load-bearing: the engine treats any event below `corroborator_confidence_cutoff`
 as *reinforcing* — it can extend the current block (handy when you're working in
 the terminal on the focused project with no AI activity) but **never** opens a
@@ -255,10 +269,11 @@ once).
 ## Status & scope
 
 Shipped (v0/v1): the Tauri + Svelte shell, the Claude Code transcript watcher,
-the segmentation engine — including the three-tier trust model and present-vs-
-running attribution — the JSONL timeline, the NeuroSkill label write, and the
-widget (current focus + present/running + status + block timer, with an expanded
-today's-blocks timeline), the optional EEG intensity meter (read-only read-back, behind the
+the segmentation engine — including the three-tier trust model, present-vs-
+running attribution, and the per-project state registry — the JSONL timeline, the
+NeuroSkill label write, and the widget (a project roster — one row per project with
+rolled-up status + present/running + state timer, each expandable to its live
+sources — plus an expanded today's-blocks timeline), the optional EEG intensity meter (read-only read-back, behind the
 `eeg-readback` feature), the Claude Code hooks receiver for real-time
 `awaiting_input` status (v1.5, opt-in), Ollama inference liveness (v1.5,
 low-confidence status), the terminal cwd corroborator (v1.5, opt-in), the

@@ -8,8 +8,9 @@
   } from "$lib/stores/neuroskill.svelte";
   import { getTodayBlocks, getFocusIntensity } from "$lib/tauri";
   import type { FocusBlock } from "$lib/types";
+  import type { Status } from "$lib/types";
   import BrandMark from "$lib/components/BrandMark.svelte";
-  import SessionRow from "$lib/components/SessionRow.svelte";
+  import ProjectRow from "$lib/components/ProjectRow.svelte";
   import IntensityMeter from "$lib/components/IntensityMeter.svelte";
   import NeuroskillStatusDot from "$lib/components/NeuroskillStatusDot.svelte";
   import BlockTimeline from "$lib/components/BlockTimeline.svelte";
@@ -17,10 +18,11 @@
 
   type View = "compact" | "timeline" | "settings";
 
-  // The compact area is a title bar + N session rows, so its height is dynamic.
-  // Expanded views add a fixed section below it.
+  // The compact area is a title bar + N project rows (+ any expanded source rows),
+  // so its height is dynamic. Expanded views add a fixed section below it.
   const TITLE_H = 44;
   const ROW_H = 30;
+  const SOURCE_ROW_H = 24;
   const LIST_PAD = 12;
   const SECTION_H: Record<Exclude<View, "compact">, number> = {
     timeline: 168,
@@ -34,19 +36,36 @@
   // Polled rather than pushed — it's a slow-moving read-back, not a focus event.
   let intensity = $state<number | null>(null);
 
-  // Active session first, then alphabetical — so the focused project leads the list.
-  const sessions = $derived(
-    [...focus.snapshot.sessions].sort((a, b) =>
-      a.active !== b.active
-        ? a.active
-          ? -1
-          : 1
-        : a.project.localeCompare(b.project),
+  // Roster order (§9): the focus project leads, then by attention priority
+  // (ACTIVE → AWAITING YOU → IDLE), then alphabetical. A priority sort, never a
+  // ranking of how fragmented the day was (principle 3).
+  const RANK: Record<Status, number> = { active: 2, awaiting_input: 1, idle: 0 };
+  const projects = $derived(
+    [...focus.snapshot.projects].sort((a, b) => {
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      if (RANK[a.status] !== RANK[b.status]) return RANK[b.status] - RANK[a.status];
+      return a.project.localeCompare(b.project);
+    }),
+  );
+
+  // Which project rows are expanded to show their sources. Keyed by slug, so a row
+  // that briefly drops and returns keeps its state.
+  let expanded = $state<Set<string>>(new Set());
+  function toggle(slug: string): void {
+    const next = new Set(expanded);
+    next.has(slug) ? next.delete(slug) : next.add(slug);
+    expanded = next;
+  }
+  const expandedSourceCount = $derived(
+    projects.reduce(
+      (acc, p) => acc + (expanded.has(p.project) ? p.sources.length : 0),
+      0,
     ),
   );
 
-  function windowHeight(v: View, rowCount: number): number {
-    const compact = TITLE_H + Math.max(1, rowCount) * ROW_H + LIST_PAD;
+  function windowHeight(v: View, rowCount: number, sourceCount: number): number {
+    const compact =
+      TITLE_H + Math.max(1, rowCount) * ROW_H + sourceCount * SOURCE_ROW_H + LIST_PAD;
     return v === "compact" ? compact : compact + SECTION_H[v];
   }
 
@@ -69,9 +88,9 @@
     return () => stopNeuroskill();
   });
 
-  // Keep the window sized to the current view + live session count.
+  // Keep the window sized to the current view + live project rows + expanded sources.
   $effect(() => {
-    resize(windowHeight(view, sessions.length));
+    resize(windowHeight(view, projects.length, expandedSourceCount));
   });
 
   $effect(() => {
@@ -129,9 +148,10 @@
     </div>
   </header>
 
-  <!-- Live sessions: one row per project, or a quiet idle row when nothing's live. -->
+  <!-- The roster: one row per live project, each expandable to its sources (§9), or a
+       quiet idle row when nothing's live. -->
   <div class="pb-2">
-    {#if sessions.length === 0}
+    {#if projects.length === 0}
       <div
         class="flex items-center gap-2 px-3 py-1"
         style="opacity: 0.55; color: var(--fg3); font-size: 14px;"
@@ -140,8 +160,12 @@
         idle
       </div>
     {:else}
-      {#each sessions as session (session.project)}
-        <SessionRow {session} />
+      {#each projects as project (project.project)}
+        <ProjectRow
+          {project}
+          expanded={expanded.has(project.project)}
+          onToggle={() => toggle(project.project)}
+        />
       {/each}
     {/if}
   </div>

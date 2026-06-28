@@ -91,6 +91,10 @@ pub fn hook_to_event(
         ts: now_rfc3339.to_string(),
         surface: Surface::ClaudeCode,
         project,
+        // The transcript file stem is the session UUID — the same per-session source key
+        // the transcript watcher emits, so a hook's status lands on the right source row.
+        source: p.transcript_path.as_deref().and_then(transcript_stem),
+        source_label: None, // engine labels it "claude code"
         kind,
         confidence: 1.0, // cwd-derived attribution, same as the transcript adapter
         detail: None,
@@ -127,6 +131,16 @@ fn resolve_slug(p: &HookPayload, aliases: &HashMap<String, String>) -> Option<St
         }
     }
     p.cwd.as_deref().and_then(basename)
+}
+
+/// The transcript file stem — the Claude Code session UUID, the per-session source
+/// key, e.g. `…/-root-Projects-waid/abc123.jsonl` → `abc123`. Matches what the
+/// transcript watcher emits as `source`.
+fn transcript_stem(transcript_path: &str) -> Option<String> {
+    std::path::Path::new(transcript_path)
+        .file_stem()?
+        .to_str()
+        .map(str::to_string)
 }
 
 /// The transcript's parent directory name (the alias-map key), e.g.
@@ -214,6 +228,9 @@ mod tests {
         assert_eq!(ev.surface, Surface::ClaudeCode);
         // Status-only, but still attributed so its row knows which session is awaiting.
         assert_eq!(ev.project.as_deref(), Some("whence"));
+        // The transcript stem is the source key — the same one the watcher emits, so the
+        // hook's status lands on the right session's source row.
+        assert_eq!(ev.source.as_deref(), Some("s"));
         assert!(!ev.kind.is_focus_evidence());
         assert_eq!(ev.ts, NOW);
     }

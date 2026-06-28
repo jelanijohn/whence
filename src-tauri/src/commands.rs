@@ -33,7 +33,7 @@ pub fn get_focus_state(state: State<AppState>) -> FocusSnapshot {
         .snapshot
         .lock()
         .map(|g| g.clone())
-        .unwrap_or(FocusSnapshot { sessions: Vec::new() })
+        .unwrap_or(FocusSnapshot { projects: Vec::new() })
 }
 
 /// Today's closed focus blocks, oldest first — drives the expanded timeline.

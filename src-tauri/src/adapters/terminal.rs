@@ -15,11 +15,14 @@
 //! alive while you work in the terminal on the focused project with no AI activity.
 //!
 //! **Transport.** A loopback receiver, mirroring the Claude hooks receiver
-//! (`hooks.rs`): a one-line shell hook POSTs `{"cwd": "<dir>"}` to
+//! (`hooks.rs`): a one-line shell hook POSTs `{"cwd": "<dir>", "id": "<shell>"}` to
 //! `http://127.0.0.1:18451/cwd` on directory change. Opt-in (`terminal_enabled`,
 //! default off) and unauthenticated by design (loopback only, principle #4). The
 //! shell snippet is the user's to add — Whence never edits shell rc files silently.
-//! E.g. for zsh: `chpwd() { curl -sm1 -d "{\"cwd\":\"$PWD\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`.
+//! E.g. for zsh: `chpwd() { curl -sm1 -d "{\"cwd\":\"$PWD\",\"id\":\"$$\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`.
+//! The `id` (the shell PID `$$`) is the per-terminal **source** key, so two shells in
+//! the same repo read as two source rows under that project (§9). It's optional — a
+//! snippet that omits it just folds all terminals on a project into one "terminal" row.
 //!
 //! Two layers, mirroring `engine::segment`'s purity ethos:
 //!   * [`cwd_to_event`] — **pure, fixture-tested**: payload → `WorkEvent` (or
@@ -45,6 +48,10 @@ pub struct CwdPayload {
     /// The shell's current working directory when the hook fired.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Per-terminal id (the shell PID `$$`) — the source key, so concurrent shells in
+    /// one repo split into distinct source rows. Optional; absent → one folded "terminal".
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// Map a cwd payload to a corroborating `WorkEvent`, or `None` when there's no
@@ -62,6 +69,9 @@ pub fn cwd_to_event(
         ts: now_rfc3339.to_string(),
         surface: Surface::Terminal,
         project: Some(project),
+        // The shell PID keys the per-terminal source row; absent → folded "terminal".
+        source: p.id.clone().filter(|s| !s.is_empty()),
+        source_label: None, // engine labels it "terminal"
         kind: WorkKind::Active,
         confidence: CWD_CONFIDENCE,
         detail: Some(format!("cwd: {cwd}")),
@@ -143,7 +153,7 @@ mod tests {
     }
 
     fn payload(cwd: &str) -> CwdPayload {
-        CwdPayload { cwd: Some(cwd.into()) }
+        CwdPayload { cwd: Some(cwd.into()), id: None }
     }
 
     #[test]
@@ -184,9 +194,21 @@ mod tests {
         let ev = cwd_to_event(&payload("/root/Projects/waid/"), &no_aliases(), NOW).unwrap();
         assert_eq!(ev.project.as_deref(), Some("waid"));
         // No cwd → no event (nothing to attribute).
-        assert!(cwd_to_event(&CwdPayload { cwd: None }, &no_aliases(), NOW).is_none());
+        assert!(cwd_to_event(&CwdPayload { cwd: None, id: None }, &no_aliases(), NOW).is_none());
         // Root / empty basename → no event, not an empty slug.
         assert!(cwd_to_event(&payload("/"), &no_aliases(), NOW).is_none());
+    }
+
+    #[test]
+    fn shell_id_becomes_the_source_key() {
+        let p = CwdPayload { cwd: Some("/root/Projects/whence".into()), id: Some("4242".into()) };
+        let ev = cwd_to_event(&p, &no_aliases(), NOW).unwrap();
+        // The shell PID is the per-terminal source key; no label (engine says "terminal").
+        assert_eq!(ev.source.as_deref(), Some("4242"));
+        assert_eq!(ev.source_label, None);
+        // An empty id is treated as "no id" → folded terminal, not a bogus "" key.
+        let p2 = CwdPayload { cwd: Some("/root/Projects/whence".into()), id: Some("".into()) };
+        assert_eq!(cwd_to_event(&p2, &no_aliases(), NOW).unwrap().source, None);
     }
 
     #[test]

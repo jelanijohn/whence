@@ -6,7 +6,7 @@ import { getFocusState, onFocus } from "$lib/tauri";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 export const focus = $state<{ snapshot: FocusSnapshot }>({
-  snapshot: { sessions: [] },
+  snapshot: { projects: [] },
 });
 
 let unlisten: UnlistenFn | null = null;
