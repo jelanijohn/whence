@@ -175,7 +175,12 @@ Every adapter emits the same normalized shape:
 ```ts
 interface WorkEvent {
   ts: string;            // ISO timestamp
-  surface: "claude-code" | "ollama" | "terminal" | "claude-desktop";
+  surface: "claude-code" | "ollama" | "terminal" | "browser" | "claude-desktop";
+  source: string;        // stable per-instance source id (one Claude Code session,
+                         // one browser tab, …) — distinct concurrent sources on the
+                         // same surface/project get distinct ids; the roster keys on it
+  label?: string | null; // optional human label ("terminal 1", "chatgpt web") for
+                         // the roster; derived from surface + index if absent
   project: string | null;// resolved project slug (null = unattributed activity)
   kind: "session\_start" | "prompt" | "tool\_use" | "awaiting\_input"
       | "active" | "idle" | "session\_end";
@@ -183,6 +188,11 @@ interface WorkEvent {
   detail?: string | null;// optional semantic payload (prompt summary, etc.)
 }
 ```
+
+`source` (new) is what the roster (§9) groups and counts on: `project` groups
+sources, `source` distinguishes the concurrent ones within a group. Adapters mint it
+stably — Claude Code from the transcript file id, the browser adapter from its
+`provider\_project\_id` / tab identity, terminal from the cwd.
 
 `project` resolution turns a `cwd` / repo path into a stable **project slug** — the
 join key across the whole ecosystem, so it must match WAID's `waid:brief=<slug>` and
@@ -316,6 +326,41 @@ immediately** to the widget. Status is not a focus switch — it's low flicker-r
 and high responsiveness-value (you *want* the widget to light up the instant
 Claude Code is waiting on you). Status never moves the focus block boundary.
 
+### The state registry (what the roster reads — additive, alongside the one focus block)
+
+The engine still holds **exactly one focus block** — a human is on one project at a
+time, and that single answer is what drives the NeuroSkill label write (§8). Nothing
+above changes.
+
+What the widget's **roster** (§9) needs is a second, read-only projection the engine
+maintains beside the focus block: a **per-project state registry**. It attributes no
+focus and writes no label — it just records, for every project that currently has a
+live or recently-live source, enough to render a row:
+
+* **sources** — the live `source`s (§6) grouped under the project's slug, each
+carrying its own surface, label, `last\_activity`, and status.
+* **attention status** — `active` / `awaiting\_input` / `idle`, rolled up from the
+project's sources (most-attention-demanding wins: any `awaiting\_input` → AWAITING
+YOU; else any `active` → ACTIVE; else IDLE). Driven by the immediate status path
+above, *per project* — **including projects that are not the current focus**.
+* **lifecycle** — the *present* / *running* distinction from above, computed per
+project rather than only for the open block: *present* if you prompted that project
+within the attention-recency window, *running* if only autonomous `tool\_use` has
+arrived since, and *neither* (dormant — shown blank) when a project is in the registry
+only because it was recently seen but has had no prompt and no live work.
+* **entered\_at** — when the project entered its current attention status, so the
+roster can show a live "time in state" timer.
+
+Two independent axes, both shown per row: **lifecycle** (present / running / —) as the
+qualifier after the name, **attention status** (ACTIVE / AWAITING YOU / IDLE) as the
+pill. These are the §7 notions exactly — the only change is that they are tracked for
+*every* project in the registry, not just the one open focus block.
+
+Eviction keeps the roster short: a project drops out once it has been `idle` past a
+`ROSTER\_RETENTION` window (longer than `IDLE\_TIMEOUT` — idle rows linger, greyed,
+before disappearing), so the roster is a current list, not a growing log. The timeline
+store (the §7 blocks) stays the durable history; the registry is live state only.
+
 \---
 
 ## 8\. NeuroSkill enrichment (requirement #1 — the write path)
@@ -363,22 +408,45 @@ Optional for v1; the write path is the requirement, the read-back is the polish.
 A small, **always-on-top, borderless, transparent** Tauri window — the same window
 techniques WAID already uses for its custom chrome.
 
-**Default (compact) state shows:**
+The widget is a **project roster**: one row per project that currently has a live or
+recently-live source (from the state registry, §7), with the **current focus
+project** distinguished at the top. A human is on one project at a time, so exactly
+one row is the focus; the others are shown so you can see what else is running or
+waiting on you without it being what you're attributed to.
 
-* **Current focus project** — name + the shared brand color/glyph for that project.
-* **Status** — active / awaiting-input / idle (driven by the immediate status path
-from §7).
-* **Present vs running** — whether the block is *present* (you've prompted recently)
-or *running* (only autonomous activity since), per §7. A subtle qualifier on the
-focus project (`waid · active` vs `waid · running`) so the widget never implies your
-attention when only Claude's is on the work.
-* **Block timer** — how long you've been on this block.
-* *(Optional)* **EEG intensity** — a small focus meter from the NeuroSkill
-read-back, when connected.
+**Header:** the `BrandMark`, a **capture-liveness indicator** (is the sensor receiving
+events / is the NeuroSkill WS up — the signal glyph in the mockup), settings, and a
+collapse control for the whole roster.
 
-**Expanded state** (click to grow): today's focus blocks as a slim timeline —
-"3 blocks today: WAID 2h10m · whatsnext 40m · whoami 25m" — diagnostic only, no
-judgement, no "you switched 9 times 😬."
+**Each project row shows:**
+
+* **Project** — name + the shared brand color/glyph for that project.
+* **Lifecycle qualifier** — *running* / *present* / — , per the state registry (§7),
+as a subtle suffix after the name (`whence · running`, `waid · present`) so the widget
+never implies your attention when only Claude's is on the work.
+* **Attention status** — ACTIVE / AWAITING YOU / IDLE as a colored pill + dot (green /
+amber / grey), driven by the immediate status path (§7), *per project*.
+* **State timer** — time in the current attention status (how long ACTIVE, how long
+AWAITING YOU, how long IDLE).
+* **Expand chevron** — reveals the project's live **sources**.
+
+**Expanded row** (per project): its live sources from the registry — each with its
+surface label (`terminal 1`, `terminal 2`, `chatgpt web`), its own status, and its own
+timer — so a project with three concurrent sessions reads as three rows under one
+project, not one blurred line.
+
+**Ordering:** by attention priority — ACTIVE first, then AWAITING YOU, then IDLE (idle
+rows greyed and de-emphasized, aged out per `ROSTER\_RETENTION`). Strictly a priority
+sort, never a ranking or a count of how fragmented your day was (principle 3).
+
+*(Optional)* **EEG intensity** — a small focus meter from the NeuroSkill read-back on
+the focus row, when connected.
+
+**Daily history** — the earlier "3 blocks today: WAID 2h10m · whatsnext 40m" timeline
+summary still has a home, but it is **no longer the expand action** (expand now opens a
+project's sources). **Open decision (§14):** a separate history view / tab, or a
+second expand affordance. Either way it stays diagnostic-only — no "you switched 9
+times 😬."
 
 **Behaviors:** draggable, remembers position, click-through-when-idle optional,
 a quiet "unattributed / idle" state rather than going blank. Reuse the
@@ -468,10 +536,12 @@ get subtly wrong.
 watcher; widget shows current project (raw, no debounce yet). Proves the signal
 is real.
 * **v1 — the product.** Segmentation engine (debounce, blocks, idle); immediate
-status path; NeuroSkill label write; local timeline store; compact + expanded
-widget. **This is the shippable sensor.**
-* **v1.5 — fidelity.** Claude Code hooks (real-time status); Ollama liveness;
-optional terminal cwd; optional EEG read-back / intensity meter.
+status path; per-project state registry + roster widget (§7, §9); **Claude Code
+hooks** for real-time `awaiting\_input` (pulled forward from v1.5 — AWAITING YOU is
+core to the roster, and §5.1 notes transcript-watch alone can't cleanly infer it);
+NeuroSkill label write; local timeline store. **This is the shippable sensor.**
+* **v1.5 — fidelity.** Ollama liveness; optional terminal cwd; optional EEG
+read-back / intensity meter.
 * **v2 — payoff pipes.** Who Am I inbox candidates; WAID intention-vs-reality.
 * **v2 (optional) — richer candidates.** Thread an aggregated semantic `detail`
 summary into `FocusBlock` so a Who Am I connector ingesting `timeline.jsonl` can
@@ -499,6 +569,14 @@ simpler-but-redundant.
 enrichment (low-confidence)? Affects whether Ollama can ever color a block.
 6. **NEW — EEG read-back in v1?** — is the widget's intensity meter v1 polish or
 v1.5? (Write path is the requirement either way.)
+7. **RESOLVED — widget shape** — **one focus block + a roster**, additive. A human is
+on one project at a time, so the single focus block (→ NeuroSkill label) is unchanged;
+the roster is a separate read-only projection (the state registry, §7) over every
+project with a live/recent source. present/running and attention status are computed
+*per project* for the roster, not only for the open block.
+8. **NEW — daily-history placement** — the "3 blocks today" summary is no longer the
+expand action (expand opens a project's sources). Separate history view/tab, or a
+second expand affordance? *Leaning: separate view.*
 
 \---
 
