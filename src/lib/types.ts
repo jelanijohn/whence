@@ -1,7 +1,12 @@
 // Mirrors the Rust models in src-tauri/src/adapters/mod.rs and engine/segment.rs.
 // Keep these in sync — the serde representations must match field-for-field.
 
-export type Surface = "claude-code" | "ollama" | "terminal" | "claude-desktop";
+export type Surface =
+  | "claude-code"
+  | "ollama"
+  | "terminal"
+  | "claude-desktop"
+  | "browser";
 
 export type WorkKind =
   | "session_start"
@@ -79,6 +84,8 @@ export interface Settings {
   ollamaEndpoint?: string | null; // override Ollama API origin; null = default http://localhost:11434
   terminalEnabled: boolean; // receive shell cwd hints (low-confidence corroborator only)
   terminalListenAddrOverride?: string | null; // override cwd receiver bind; null = default 127.0.0.1:18451
+  browserEnabled: boolean; // receive browser LLM sessions from the first-party extension (originating-capable)
+  browserListenAddrOverride?: string | null; // override browser receiver bind; null = default 127.0.0.1:18452
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block
   corroboratorConfidenceCutoff: number; // ≥ this = primary signal; below = weak hint (§7)

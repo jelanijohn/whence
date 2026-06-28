@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{slug_from_transcript_dir, Surface, WorkEvent, WorkKind};
+use super::{slug_from_transcript_dir, slugify, Surface, WorkEvent, WorkKind};
 
 /// `~/.claude/projects` — the root of Claude Code's per-project transcripts.
 pub fn transcripts_root() -> Option<PathBuf> {
@@ -146,10 +146,12 @@ pub(crate) fn slug_from_cwd(path: &Path) -> Option<String> {
             continue;
         };
         if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
-            // Split on both separators so a Windows-style cwd basenames correctly.
+            // Split on both separators so a Windows-style cwd basenames correctly,
+            // then run the basename through the shared `slugify` so an fs-resolved slug
+            // converges with a browser-minted one for the same project name (§5/§9).
             let base = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next()?;
-            if !base.is_empty() {
-                return Some(base.to_string());
+            if let Some(slug) = slugify(base) {
+                return Some(slug);
             }
         }
     }

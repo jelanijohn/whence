@@ -33,6 +33,12 @@ export function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }
 
+/** Absolute path to the browser-adapter mapping file (browser_mapping.toml) — shown
+ *  in settings as a hand-editable deep-link. */
+export function getBrowserMappingPath(): Promise<string> {
+  return invoke("get_browser_mapping_path");
+}
+
 /** Persist settings. Toggling `autostart` registers/unregisters the launch agent. */
 export function setSettings(settings: Settings): Promise<Settings> {
   return invoke("set_settings", { settings });

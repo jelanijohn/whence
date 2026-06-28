@@ -72,18 +72,22 @@ src-tauri/src/
   lib.rs                        Plugin + command + window registration; spawns core.
   commands.rs                   get_focus_state · get_today_blocks ·
                                   get_focus_intensity · get_neuroskill_status ·
-                                  get/set_settings · install/uninstall_claude_hooks.
+                                  get_browser_mapping_path · get/set_settings ·
+                                  install/uninstall_claude_hooks.
   orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
   settings.rs                   Tiny JSON settings file in the app data dir.
   adapters/
-    mod.rs                      WorkEvent model + adapter contract.
-    claude_code.rs              Transcript watch (the one live surface) + slug resolve.
+    mod.rs                      WorkEvent model + adapter contract + shared slugify.
+    claude_code.rs              Transcript watch (a live surface) + slug resolve.
     hooks.rs                    Loopback receiver for Claude Code http hooks —
                                   live awaiting_input status. PURE event mapping.
     ollama.rs                   /api/ps inference-liveness poll (low-confidence
                                   status only). PURE activity detection.
     terminal.rs                 Loopback receiver for shell cwd hints — a
                                   low-confidence corroborator. PURE cwd mapping.
+    browser.rs                  Loopback receiver for the browser extension —
+                                  originating-capable LLM-session attribution.
+    browser_map.rs              Provider→slug mapping store (format-preserving TOML).
   engine/
     segment.rs                  Debounce / switch confirmation / blocks — PURE,
                                   fixture-tested: no I/O, every time comes in via
@@ -94,6 +98,9 @@ src-tauri/src/
     health.rs                   Periodic side-effect-free connection probe + status.
     eeg.rs                      Optional read-only intensity read-back + activity.sqlite
                                   path resolution (eeg-readback feature).
+extension/                    First-party MV3 browser extension (claude.ai /
+                                chatgpt.com) → the browser receiver. providers.js
+                                centralizes the brittle DOM selectors; loaded unpacked.
 ```
 
 `engine/segment.rs` is the heart and is kept **pure** — feed it a `WorkEvent`
@@ -148,11 +155,31 @@ Settings) does a merge-preserving write of the hook config into
 The event-to-`WorkEvent` mapping is pure and fixture-tested; only the socket is
 impure.
 
+**Browser LLM** (`browser.rs`) is the first **originating-capable** surface beyond
+Claude Code: it self-attributes from the provider's *own* project identity, so it
+can mint a project rather than merely corroborate one. A first-party MV3 browser
+extension (`extension/`, loaded unpacked) reads only the project-scoped URL and the
+provider's project id + name — a self-declared marker, never chat content or which
+tab is focused — and POSTs them to a loopback `tiny_http` listener (default
+`127.0.0.1:18452`, override via `browser_listen_addr_override`). The **daemon** owns
+resolution: a normalized-URL fast path, then the provider project id (stable across
+renames), else a fresh mint with `slug = slugify(name)`. The provider→slug map is a
+hand-editable TOML (`browser_mapping.toml`, surfaced in Settings) written
+format-preservingly via `toml_edit`. A chat filed under no project resolves to
+`project: None` and is dropped (ambient, not an error). It's **opt-in (default off)**
+via the `browser` setting and needs the extension installed; the resolution and
+event mapping are fixture-tested, only the socket and store I/O are impure. The
+extension's DOM selectors are brittle by construction (provider markup churns) and
+all live in one `providers.js` table to patch.
+
 **Project slug** is the join key across the ecosystem — it must match WAID's
 brief slug and Who Am I's naming. Resolved in priority order: a `project_aliases`
 override keyed by transcript dir name, then the basename of the transcript's
 first `cwd` line (the lossless source), then the dir-name trailing segment as a
-provisional fallback.
+provisional fallback. Filesystem basenames and browser-minted names alike pass
+through one shared `slugify`, so the same project name reached from different
+surfaces — a `~/Projects/whence` checkout and a "Whence" browser project —
+converges onto a single node, no merge step.
 
 ### NeuroSkill labels — the write path
 
@@ -234,8 +261,10 @@ widget (current focus + present/running + status + block timer, with an expanded
 today's-blocks timeline), the optional EEG intensity meter (read-only read-back, behind the
 `eeg-readback` feature), the Claude Code hooks receiver for real-time
 `awaiting_input` status (v1.5, opt-in), Ollama inference liveness (v1.5,
-low-confidence status), the terminal cwd corroborator (v1.5, opt-in), and the
-NeuroSkill connection-health indicator (v1.5).
+low-confidence status), the terminal cwd corroborator (v1.5, opt-in), the
+NeuroSkill connection-health indicator (v1.5), and the browser LLM adapter —
+claude.ai / chatgpt.com sessions via a first-party extension (opt-in,
+originating-capable).
 Planned: debounce calibration on real data (v1), then Who Am I inbox candidates
 and WAID intention-vs-reality (v2). See [`whence-spec.md`](whence-spec.md) §13.
 

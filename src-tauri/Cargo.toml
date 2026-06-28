@@ -43,6 +43,10 @@ notify = "6"
 tiny_http = "0.12"
 # Ollama /api/ps poll and the NeuroSkill HTTP `label` write (à la WAID's client).
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# Browser-adapter mapping store: format-preserving TOML so the daemon's backfill/
+# mint writes round-trip without clobbering the user's hand-edits, comments, or
+# ordering (browser_map.rs, §4).
+toml_edit = "0.22"
 
 # Optional read-only NeuroSkill EEG read-back for the intensity meter (v1.5
 # polish; the write path is the v1 requirement). `bundled` avoids a system

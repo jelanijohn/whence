@@ -5,6 +5,7 @@
     setSettings,
     installClaudeHooks,
     uninstallClaudeHooks,
+    getBrowserMappingPath,
   } from "$lib/tauri";
   import type { Settings } from "$lib/types";
   import { neuroskill } from "$lib/stores/neuroskill.svelte";
@@ -25,6 +26,7 @@
     ollamaEnabled: boolean;
     ollamaEndpoint: string;
     terminalEnabled: boolean;
+    browserEnabled: boolean;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
     corroboratorConfidenceCutoff: number;
@@ -50,6 +52,7 @@
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? "",
       terminalEnabled: s.terminalEnabled,
+      browserEnabled: s.browserEnabled,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -84,6 +87,7 @@
       ollamaEnabled: d.ollamaEnabled,
       ollamaEndpoint: d.ollamaEndpoint.trim() || null,
       terminalEnabled: d.terminalEnabled,
+      browserEnabled: d.browserEnabled,
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
@@ -106,6 +110,7 @@
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? null,
       terminalEnabled: s.terminalEnabled,
+      browserEnabled: s.browserEnabled,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -141,6 +146,10 @@
             : "Checking…",
   );
 
+  // The hand-editable browser mapping file's path — surfaced as a deep-link when the
+  // browser adapter is on. Best-effort: a failure just hides the path hint.
+  let browserMappingPath = $state<string | null>(null);
+
   onMount(async () => {
     try {
       const s = await getSettings();
@@ -150,6 +159,11 @@
       error = String(e);
     } finally {
       loading = false;
+    }
+    try {
+      browserMappingPath = await getBrowserMappingPath();
+    } catch {
+      browserMappingPath = null;
     }
   });
 
@@ -362,6 +376,33 @@
             >{`chpwd(){ curl -sm1 -d "{\\"cwd\\":\\"$PWD\\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`}</code
           >
         </p>
+      {/if}
+    </div>
+
+    <!-- Browser LLM -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Browser</p>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Browser AI sessions</span>
+        <Toggle bind:checked={draft.browserEnabled} label="Browser LLM sessions" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Attributes claude.ai / chatgpt.com chats by their provider project — a first-class session,
+        not a corroborator. Needs the Whence browser extension.
+      </p>
+      {#if draft.browserEnabled}
+        <p style="color: var(--fg3); font-size: 11px;">
+          Install the extension from <span class="tabular-nums">extension/</span> (load unpacked); it
+          POSTs to <span class="tabular-nums">127.0.0.1:18452/browser</span>.
+        </p>
+        {#if browserMappingPath}
+          <p style="color: var(--fg3); font-size: 11px;">
+            Project mapping (hand-editable):
+            <code style="color: var(--fg2); font-size: 10px; word-break: break-all;"
+              >{browserMappingPath}</code
+            >
+          </p>
+        {/if}
       {/if}
     </div>
 

@@ -162,6 +162,10 @@ only capture options are fragile (accessibility-tree scraping) or manual. **Spec
 recommendation: defer for v1.** Claude Code + Ollama are the clean signals; don't
 let the hardest surface gate the first release.
 
+### 5.5 Browser LLM chat (new surface adapter)
+
+First-class browser AI-chat capture (claude.ai, chatgpt.com, …) as an originating, rootless surface adapter — full design in [`docs/browser-llm-adapter.md`](docs/browser-llm-adapter.md).
+
 \---
 
 ## 6\. The `WorkEvent` model

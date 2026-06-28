@@ -85,6 +85,17 @@ pub fn get_neuroskill_status(state: State<AppState>) -> NeuroskillStatus {
         .unwrap_or(NeuroskillStatus::Unknown)
 }
 
+/// Absolute path to the browser-adapter mapping file (`browser_mapping.toml`), for
+/// the settings deep-link (§7). The file is hand-editable — re-slug a rename, fix a
+/// bad mint — so the panel surfaces where it lives. Returns the path whether or not
+/// it exists yet (the daemon creates it on first mint).
+#[tauri::command]
+pub fn get_browser_mapping_path(state: State<AppState>) -> String {
+    crate::adapters::browser_map::mapping_path(&state.data_dir)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[tauri::command]
 pub fn get_settings(state: State<AppState>) -> Settings {
     state

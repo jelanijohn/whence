@@ -75,6 +75,18 @@ pub struct Settings {
     /// is unauthenticated (principle #4).
     #[serde(default)]
     pub terminal_listen_addr_override: Option<String>,
+    /// Receive browser LLM sessions from the first-party Whence extension — an
+    /// **originating-capable** surface (self-attributes from the provider's project
+    /// identity; §2). **Opt-in, default off:** it needs the extension installed and
+    /// pointed at the loopback receiver, so enabling the flag alone does nothing until
+    /// that's set up. The provider→slug mapping lives in `browser_mapping.toml`.
+    #[serde(default)]
+    pub browser_enabled: bool,
+    /// Override the loopback address the browser receiver binds. `None` = the built-in
+    /// default (`127.0.0.1:18452`). Loopback-only by design — the receiver is
+    /// unauthenticated (principle #4); the extension POSTs to it from the page.
+    #[serde(default)]
+    pub browser_listen_addr_override: Option<String>,
     /// Sustained seconds before a focus switch is confirmed.
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
@@ -111,6 +123,8 @@ impl Default for Settings {
             ollama_endpoint: None,
             terminal_enabled: false,
             terminal_listen_addr_override: None,
+            browser_enabled: false,
+            browser_listen_addr_override: None,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
             corroborator_confidence_cutoff: 0.6,
@@ -129,6 +143,11 @@ pub const DEFAULT_OLLAMA_ORIGIN: &str = "http://localhost:11434";
 /// Default loopback bind for the terminal cwd receiver. Distinct fixed port from
 /// the Claude hooks receiver (18450) so both can run at once.
 pub const DEFAULT_TERMINAL_ADDR: &str = "127.0.0.1:18451";
+
+/// Default loopback bind for the browser receiver. Distinct fixed port from the
+/// hooks (18450) and terminal (18451) receivers so all three can run at once; the
+/// extension POSTs to this address.
+pub const DEFAULT_BROWSER_ADDR: &str = "127.0.0.1:18452";
 
 impl Settings {
     pub fn segment_config(&self) -> crate::engine::segment::SegmentConfig {
@@ -154,6 +173,14 @@ impl Settings {
         self.terminal_listen_addr_override
             .clone()
             .unwrap_or_else(|| DEFAULT_TERMINAL_ADDR.to_string())
+    }
+
+    /// The `host:port` the browser receiver binds — the override or the built-in
+    /// loopback default.
+    pub fn browser_listen_addr(&self) -> String {
+        self.browser_listen_addr_override
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BROWSER_ADDR.to_string())
     }
 
     /// The Ollama `/api/ps` URL to poll — the (override or default) origin with the

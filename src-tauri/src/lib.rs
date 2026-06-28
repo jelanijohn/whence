@@ -110,6 +110,25 @@ pub fn run() {
                     }
                 }
 
+                // Browser receiver (opt-in, default off): originating-capable browser
+                // LLM sessions from the first-party extension. A corrupt mapping file
+                // disables it (rather than clobbering the user's hand-edits); a taken
+                // port likewise just means no browser attribution — degrade, don't crash.
+                if loaded.browser_enabled {
+                    let browser_addr = loaded.browser_listen_addr();
+                    let map_path = adapters::browser_map::mapping_path(&data_dir);
+                    match adapters::browser_map::MappingStore::load(&map_path) {
+                        Ok(store) => {
+                            if let Err(e) =
+                                adapters::browser::serve(tx.clone(), store, &browser_addr)
+                            {
+                                eprintln!("whence: browser receiver not started: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("whence: browser receiver not started: {e}"),
+                    }
+                }
+
                 let _watcher = match adapters::claude_code::watch(tx, aliases) {
                     Ok(w) => w,
                     Err(e) => {
@@ -127,6 +146,7 @@ pub fn run() {
             commands::get_today_blocks,
             commands::get_focus_intensity,
             commands::get_neuroskill_status,
+            commands::get_browser_mapping_path,
             commands::get_settings,
             commands::set_settings,
             commands::install_claude_hooks,
