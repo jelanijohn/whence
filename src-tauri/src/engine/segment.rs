@@ -543,15 +543,25 @@ impl Segmenter {
             WorkKind::AwaitingInput => Some(Status::AwaitingInput),
             WorkKind::Idle => Some(Status::Idle),
             WorkKind::Prompt | WorkKind::ToolUse | WorkKind::SessionStart => Some(Status::Active),
-            // Generic activity is a *weak* active signal: it must NOT override
-            // `awaiting_input`. When a Claude Code turn ends, the `Stop` hook sets
-            // awaiting_input, then the trailing end-of-turn transcript write lands a
-            // beat later as a generic `Active`; without this guard it clobbers
-            // awaiting_input straight back to active and "awaiting you" is never seen.
-            WorkKind::Active => match self.projects.get(&project).and_then(|p| p.sources.get(&key)) {
-                Some(s) if s.status == Status::AwaitingInput => None,
-                _ => Some(Status::Active),
-            },
+            // Generic activity is a *weak* active signal — but only on Claude Code,
+            // where a turn ends with the `Stop` hook setting awaiting_input and the
+            // trailing end-of-turn transcript write lands a beat later as a generic
+            // `Active`; without this guard that trailing write clobbers awaiting_input
+            // straight back to active and "awaiting you" is never seen. Other surfaces
+            // have no such trailing-write race: the browser's `Active` means the model
+            // is streaming *right now* (the page shows a Stop control), so it must
+            // override a stale awaiting — else a generating Design/chat session reads as
+            // "awaiting you" the whole time it's thinking.
+            WorkKind::Active
+                if ev.surface == Surface::ClaudeCode
+                    && matches!(
+                        self.projects.get(&project).and_then(|p| p.sources.get(&key)),
+                        Some(s) if s.status == Status::AwaitingInput,
+                    ) =>
+            {
+                None
+            }
+            WorkKind::Active => Some(Status::Active),
             WorkKind::SessionEnd => unreachable!("handled above"),
         };
 
@@ -1143,6 +1153,34 @@ mod tests {
         // The next real prompt is what clears awaiting.
         s.ingest(&status_ev(30, "whence", WorkKind::Prompt));
         assert_eq!(status_of(&s, "whence"), Some(Status::Active));
+    }
+
+    #[test]
+    fn browser_streaming_active_overrides_stale_awaiting() {
+        // The trailing-write guard is Claude-Code-specific. A browser session can sit
+        // awaiting (idle, ball in your court), then the model starts generating — which
+        // the extension reports as a generic `Active` (a Stop control is on the page),
+        // NOT as a turn-increment Prompt (the assistant turn hasn't landed yet). That
+        // `Active` must flip the row out of awaiting; otherwise "thinking…" reads as
+        // "awaiting you" for the whole generation (the reported bug).
+        let mut s = Segmenter::new(SegmentConfig::default());
+
+        let mut idle = status_ev(0, "whence", WorkKind::AwaitingInput);
+        idle.surface = Surface::Browser;
+        idle.source = Some("https://claude.ai/design/p/d1".into());
+        s.ingest(&idle);
+        assert_eq!(status_of(&s, "whence"), Some(Status::AwaitingInput));
+
+        // Model starts streaming → generic Active on the SAME browser source.
+        let mut streaming = status_ev(10, "whence", WorkKind::Active);
+        streaming.surface = Surface::Browser;
+        streaming.source = Some("https://claude.ai/design/p/d1".into());
+        s.ingest(&streaming);
+        assert_eq!(
+            status_of(&s, "whence"),
+            Some(Status::Active),
+            "a browser streaming Active must override a stale awaiting"
+        );
     }
 
     /// A low-confidence corroborating event (a terminal `cd`), like the terminal

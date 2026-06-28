@@ -111,8 +111,11 @@ pub enum Resolution {
 /// mapping store, so it must be stable; the **host is the only robust field** (§8),
 /// which is why attribution keys on it rather than the extension's self-report.
 ///
-/// This is the centralized provider allowlist — extend it (and the extension's
-/// `providers.js`) to add a surface.
+/// This is the centralized provider-by-host allowlist — extend it (and the
+/// extension's `providers.js`) to add a surface. Most surfaces are one provider per
+/// host; when a single host serves more than one (claude.ai serves chat *and* Claude
+/// Design), the path disambiguates in [`provider_for_url`], which is what the call
+/// sites use. This stays the host primitive.
 pub fn provider_for_host(host: &str) -> Option<&'static str> {
     let h = host.to_lowercase();
     if h == "claude.ai" || h.ends_with(".claude.ai") {
@@ -122,6 +125,45 @@ pub fn provider_for_host(host: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Map a (host + path) to a provider id — the path-aware selection (claude-design §1).
+/// One host can serve multiple provider surfaces; the path-prefix disambiguates,
+/// **specificity-ordered** (§2): the more specific `/design` surface is checked before
+/// the host's default surface. The extension's `content.js` must apply the same rule —
+/// the "extension and daemon agree on provider derivation" invariant now covers the
+/// path, not just the host (§7).
+///
+/// Today only `claude.ai` is multi-surface; every other host falls straight through to
+/// its single [`provider_for_host`] provider regardless of path.
+pub fn provider_for_url(host: &str, path: &str) -> Option<&'static str> {
+    match provider_for_host(host)? {
+        // claude.ai serves chat at the host default and Claude Design under /design.
+        // Design is its own provider id (its own store keyspace, §1), not a sub-surface
+        // of `claude`; it converges with chat/fs at the slug layer (§5).
+        "claude" if path_has_prefix(path, "/design") => Some("claude-design"),
+        other => Some(other),
+    }
+}
+
+/// The path portion of a URL (leading slash kept), or `"/"` when there's none. Pure,
+/// same hand-rolled scope as [`host_of`] — the inputs are the handful of provider URLs.
+fn path_of(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    match rest.find('/') {
+        Some(i) => {
+            let p = &rest[i..];
+            p.split(['?', '#']).next().unwrap_or(p).to_string()
+        }
+        None => "/".to_string(),
+    }
+}
+
+/// Whether `path` lies under `prefix` as a *path segment* boundary: `prefix` itself or
+/// `prefix/…`, but not `prefixfoo` (so `/design` matches `/design` and `/design/x` but
+/// never `/designs`). Mirror this in the extension's `pathHasPrefix`.
+fn path_has_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix || (path.starts_with(prefix) && path[prefix.len()..].starts_with('/'))
 }
 
 /// The host portion of a URL, lowercased, sans scheme / userinfo / port / path.
@@ -163,7 +205,7 @@ pub fn normalize_url(url: &str) -> String {
 pub fn resolve(p: &BrowserPayload, store: &mut MappingStore) -> Resolution {
     let Some(url) = p.url.as_deref() else { return Resolution::Ignore };
     let Some(host) = host_of(url) else { return Resolution::Ignore };
-    let Some(provider) = provider_for_host(&host) else { return Resolution::Ignore };
+    let Some(provider) = provider_for_url(&host, &path_of(url)) else { return Resolution::Ignore };
 
     let norm = normalize_url(url);
 
@@ -246,7 +288,7 @@ pub fn event_for(
         // bare `Browser` surface can't carry.
         Some(url) => (
             Some(normalize_url(url)),
-            host_of(url).and_then(|h| provider_for_host(&h)).map(source_label_for),
+            host_of(url).and_then(|h| provider_for_url(&h, &path_of(url))).map(source_label_for),
         ),
         None => (None, None),
     };
@@ -266,6 +308,9 @@ pub fn event_for(
 fn source_label_for(provider: &str) -> String {
     match provider {
         "claude" => "claude web".to_string(),
+        // Distinct row label so the tree shows `claude web` and `claude design` as
+        // separate children under one project node (§1). Not "claude-design web".
+        "claude-design" => "claude design".to_string(),
         "chatgpt" => "chatgpt web".to_string(),
         other => format!("{other} web"),
     }
@@ -369,6 +414,30 @@ urls                  = ["https://claude.ai/project/proj_abc"]
         // Not a provider host → not our concern.
         assert_eq!(provider_for_host("example.com"), None);
         assert_eq!(provider_for_host("notclaude.ai"), None); // suffix guard
+    }
+
+    #[test]
+    fn provider_for_url_is_path_aware_for_claude_design() {
+        // claude.ai default surface (chat) vs. the /design surface (§1/§2).
+        assert_eq!(provider_for_url("claude.ai", "/project/x"), Some("claude"));
+        assert_eq!(provider_for_url("claude.ai", "/design"), Some("claude-design"));
+        assert_eq!(provider_for_url("claude.ai", "/design/abc"), Some("claude-design"));
+        // Specificity is segment-bounded: /designs is NOT the design surface.
+        assert_eq!(provider_for_url("claude.ai", "/designs"), Some("claude"));
+        assert_eq!(provider_for_url("claude.ai", "/designer/x"), Some("claude"));
+        // Host default with no/empty path is still chat.
+        assert_eq!(provider_for_url("claude.ai", "/"), Some("claude"));
+        // Other hosts fall straight through, path-independent.
+        assert_eq!(provider_for_url("chatgpt.com", "/design/x"), Some("chatgpt"));
+        assert_eq!(provider_for_url("example.com", "/design"), None);
+    }
+
+    #[test]
+    fn path_of_extracts_path_sans_query_fragment() {
+        assert_eq!(path_of("https://claude.ai/design/x?ref=1#top"), "/design/x");
+        assert_eq!(path_of("https://claude.ai"), "/");
+        assert_eq!(path_of("claude.ai/design"), "/design"); // scheme-less
+        assert_eq!(path_of("https://claude.ai/?q=1"), "/");
     }
 
     #[test]
@@ -486,6 +555,23 @@ urls                  = ["https://claude.ai/project/proj_abc"]
     }
 
     #[test]
+    fn design_mints_under_its_own_provider_keyspace() {
+        // A /design session resolves to provider `claude-design`, a separate keyspace
+        // from chat's `claude` — no collision even if the ids ever overlapped (§1).
+        let mut store = MappingStore::from_str("").unwrap();
+        let mut p = payload();
+        p.url = Some("https://claude.ai/design/d-123".into());
+        p.provider_project_id = Some("d-123".into());
+        p.provider_project_name = Some("Whence".into());
+        // Minted via the shared slugify → converges with the fs `whence` at the slug
+        // layer (§5), while keyed independently of any chat project.
+        assert_eq!(resolve(&p, &mut store), Resolution::Attributed("whence".into()));
+        assert_eq!(store.lookup_provider("claude-design", "d-123").as_deref(), Some("whence"));
+        // The chat keyspace is untouched: the same id under `claude` is unknown.
+        assert!(store.lookup_provider("claude", "d-123").is_none());
+    }
+
+    #[test]
     fn event_streaming_is_autonomous_active() {
         let mut p = payload();
         p.url = Some("https://claude.ai/project/x".into());
@@ -514,6 +600,12 @@ urls                  = ["https://claude.ai/project/proj_abc"]
         claude.url = Some("https://claude.ai/project/x".into());
         let ev = event_for("whence".into(), &claude, None, NOW);
         assert_eq!(ev.source_label.as_deref(), Some("claude web"));
+
+        // A /design URL earns the distinct "claude design" row label (§1).
+        let mut design = payload();
+        design.url = Some("https://claude.ai/design/d-1".into());
+        let ev = event_for("whence".into(), &design, None, NOW);
+        assert_eq!(ev.source_label.as_deref(), Some("claude design"));
     }
 
     #[test]

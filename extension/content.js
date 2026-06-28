@@ -18,9 +18,24 @@
   // what the sensor reads on real provider pages.
   const WHENCE_DEBUG = false;
 
-  const cfg = (typeof WHENCE_PROVIDERS !== "undefined" ? WHENCE_PROVIDERS : []).find(
-    (p) => p.hostPattern.test(location.host),
+  // Whether `path` lies under `prefix` at a segment boundary: `prefix` itself or
+  // `prefix/…`, never `prefixfoo` (so "/design" matches "/design" and "/design/x"
+  // but not "/designs"). Mirrors the daemon's `path_has_prefix`.
+  function pathHasPrefix(path, prefix) {
+    return path === prefix || (path.startsWith(prefix) && path[prefix.length] === "/");
+  }
+
+  // Provider selection is host+path-aware (claude.ai serves chat AND Claude Design):
+  // an entry matches when its host matches AND, if it declares a `pathPrefix`, the
+  // path is under it. Specificity-ordered (§2): a pathPrefix entry is more specific
+  // than the bare-host fallback, so it wins when both match — order-independently.
+  const providers = typeof WHENCE_PROVIDERS !== "undefined" ? WHENCE_PROVIDERS : [];
+  const matches = providers.filter(
+    (p) =>
+      p.hostPattern.test(location.host) &&
+      (!p.pathPrefix || pathHasPrefix(location.pathname, p.pathPrefix)),
   );
+  const cfg = matches.find((p) => p.pathPrefix) || matches[0];
   if (!cfg) {
     if (WHENCE_DEBUG) console.log("[whence] no provider config matches host", location.host);
     return; // not an allowlisted provider page
