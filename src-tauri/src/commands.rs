@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::adapters::browser::RaiseQueue;
+use crate::adapters::{Surface, WorkEvent, WorkKind};
 use crate::orchestrator::SharedSnapshot;
 use crate::engine::segment::{FocusBlock, FocusSnapshot};
 use crate::engine::timeline;
@@ -23,6 +27,11 @@ pub struct AppState {
     /// here for the widget's first paint (it then tracks the `whence://neuroskill`
     /// event).
     pub neuroskill: SharedStatus,
+    /// The core `WorkEvent` channel — the *only* way a command can influence focus, by
+    /// injecting an event the segmenter ingests like any adapter's (`focus_source`).
+    pub tx: UnboundedSender<WorkEvent>,
+    /// Pending browser-tab raises the extension drains via `GET /raise`.
+    pub raise_queue: RaiseQueue,
 }
 
 /// Current focus snapshot — every live session (each with its own status + timer).
@@ -34,6 +43,34 @@ pub fn get_focus_state(state: State<AppState>) -> FocusSnapshot {
         .lock()
         .map(|g| g.clone())
         .unwrap_or(FocusSnapshot { projects: Vec::new() })
+}
+
+/// Manually raise a browser tab and pull its project into focus. The frontend only
+/// fires this for browser source rows (the one surface whose tab the extension can
+/// raise), passing the project slug and the source's normalized URL.
+///
+/// Does *both* halves of a click: (1) enqueues the raise for the extension's `GET
+/// /raise` poll, and (2) injects a synthetic *you-acted* `Select` event so focus
+/// switches immediately (marked `present`) — which drives the NeuroSkill `:start`/
+/// `:end` labels and the timeline block through the normal effect path, no special
+/// casing. Degrades cleanly: with the extension absent the raise is simply never
+/// drained, and focus still switches.
+#[tauri::command]
+pub fn focus_source(state: State<AppState>, project: String, source: String) -> Result<(), String> {
+    crate::adapters::browser::enqueue_raise(&state.raise_queue, source.clone());
+    let ev = WorkEvent {
+        ts: chrono::Utc::now().to_rfc3339(),
+        surface: Surface::Browser,
+        project: Some(project),
+        source: Some(source.clone()),
+        // The row already exists; the engine only sets a source's label on insert, so
+        // leaving this `None` preserves the existing `"claude web"`/`"chatgpt web"`.
+        source_label: None,
+        kind: WorkKind::Select,
+        confidence: 1.0,
+        detail: Some(format!("manual select: {source}")),
+    };
+    state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
 }
 
 /// Today's closed focus blocks, oldest first — drives the expanded timeline.

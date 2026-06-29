@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ProjectSnapshot } from "$lib/types";
+  import type { ProjectSnapshot, SourceSnapshot } from "$lib/types";
   import BrandMark from "./BrandMark.svelte";
   import StatusDot from "./StatusDot.svelte";
   import BlockTimer from "./BlockTimer.svelte";
@@ -13,7 +13,14 @@
     project,
     expanded,
     onToggle,
-  }: { project: ProjectSnapshot; expanded: boolean; onToggle: () => void } = $props();
+    onActivate,
+  }: {
+    project: ProjectSnapshot;
+    expanded: boolean;
+    onToggle: () => void;
+    // Fired when a (browser) source row is clicked: raise its tab + focus the project.
+    onActivate?: (project: string, source: SourceSnapshot) => void;
+  } = $props();
 
   // Present vs running (§7) — a subtle qualifier on the active project only, so the
   // widget never implies your attention when only Claude's is on the work.
@@ -66,8 +73,8 @@
   </div>
 
   {#if expanded}
-    {#each project.sources as source (source.label)}
-      <SourceRow {source} />
+    {#each project.sources as source (source.source ?? source.label)}
+      <SourceRow {source} onActivate={() => onActivate?.(project.project, source)} />
     {/each}
   {/if}
 </div>

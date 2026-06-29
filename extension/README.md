@@ -23,6 +23,17 @@ Attribution never derives from which window is foregrounded — reading the proj
 marker is the same category as reading a repo marker, not the surveillance category
 §2 rejects.
 
+## Raising a tab (the back-channel)
+
+Clicking a browser source row in the widget raises that tab. The daemon enqueues the
+target URL; the service worker polls `127.0.0.1:18452/raise` (loopback-only,
+unauthenticated, no page content) and activates the tab whose URL matches. The match
+is purely on the handed-in URL — the extension never reads which tab/window is
+foregrounded, so this *writes* focus without ever *reading* OS focus (§1/§2). A
+content-script keepalive port keeps the worker alive (and the poll running) only while
+a provider tab is open. No extra permissions: `host_permissions` already covers both
+the loopback poll and activating the provider tabs.
+
 ## Install (load unpacked)
 
 1. In the Whence widget settings, enable **Browser → Browser AI sessions** and save
@@ -53,8 +64,10 @@ working:
 - `manifest.json` — MV3 manifest (host permissions, content script, service worker).
 - `providers.js` — the per-provider config table (hosts, URL patterns, selectors).
   **All brittleness is centralized here.**
-- `content.js` — reads the page per the config, forwards observations to the worker.
-- `background.js` — relays observations to the loopback receiver.
+- `content.js` — reads the page per the config, forwards observations to the worker,
+  and holds a keepalive port so the worker's raise-poll stays alive while the tab is open.
+- `background.js` — relays observations to the loopback receiver, and polls the
+  `/raise` back-channel to activate a tab the widget asked to raise.
 
 To add a provider, add an entry in `providers.js` **and** extend `provider_for_host`
 in `src-tauri/src/adapters/browser.rs` (the daemon re-derives the provider from the

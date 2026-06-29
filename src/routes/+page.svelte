@@ -7,8 +7,8 @@
     stopNeuroskill,
   } from "$lib/stores/neuroskill.svelte";
   import { appearance, loadAppearance } from "$lib/stores/appearance.svelte";
-  import { getTodayBlocks, getFocusIntensity } from "$lib/tauri";
-  import type { FocusBlock } from "$lib/types";
+  import { getTodayBlocks, getFocusIntensity, focusSource } from "$lib/tauri";
+  import type { FocusBlock, SourceSnapshot } from "$lib/types";
   import type { Status } from "$lib/types";
   import BrandMark from "$lib/components/BrandMark.svelte";
   import ProjectRow from "$lib/components/ProjectRow.svelte";
@@ -63,6 +63,18 @@
       0,
     ),
   );
+
+  // Click a (browser) source row: raise its tab and pull the project into focus. Only
+  // browser rows surface a `source` id and an `onActivate`, so this never fires for the
+  // unraisable surfaces. Best-effort — a failed invoke (backend down) is swallowed.
+  async function activateSource(project: string, source: SourceSnapshot) {
+    if (!source.source) return;
+    try {
+      await focusSource(project, source.source);
+    } catch {
+      // No backend (e.g. `vite dev`) — nothing to raise.
+    }
+  }
 
   function windowHeight(v: View, rowCount: number, sourceCount: number): number {
     const compact =
@@ -179,6 +191,7 @@
           {project}
           expanded={expanded.has(project.project)}
           onToggle={() => toggle(project.project)}
+          onActivate={activateSource}
         />
       {/each}
     {/if}

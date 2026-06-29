@@ -17,6 +17,12 @@ export function getFocusState(): Promise<FocusSnapshot> {
   return invoke("get_focus_state");
 }
 
+/** Raise the browser tab for `source` and pull `project` into focus. Browser source
+ *  rows only — `source` is the row's normalized conversation URL. */
+export function focusSource(project: string, source: string): Promise<void> {
+  return invoke("focus_source", { project, source });
+}
+
 /** Today's closed focus blocks, oldest first — drives the expanded timeline. */
 export function getTodayBlocks(): Promise<FocusBlock[]> {
   return invoke("get_today_blocks");

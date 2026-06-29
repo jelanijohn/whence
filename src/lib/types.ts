@@ -15,7 +15,8 @@ export type WorkKind =
   | "awaiting_input"
   | "active"
   | "idle"
-  | "session_end";
+  | "session_end"
+  | "select"; // a manual click on a source row — a you-acted focus override
 
 export interface WorkEvent {
   ts: string; // ISO-8601
@@ -62,6 +63,7 @@ export interface FocusBlock {
 // conversation, or terminal (§9). Revealed when a project row is expanded.
 export interface SourceSnapshot {
   surface: Surface;
+  source?: string | null; // per-instance source id (browser = normalized URL); null = none
   label: string; // display label; numbered ("terminal 1") when a kind repeats
   status: Status;
   statusSince: number; // unix seconds; the source's time-in-status timer base

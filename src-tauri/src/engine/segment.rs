@@ -141,6 +141,13 @@ pub struct FocusBlock {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceSnapshot {
     pub surface: Surface,
+    /// Stable per-instance source id — the part of [`source_key`] after the unit
+    /// separator: the browser conversation URL, the CC session UUID, the terminal id.
+    /// `None` when the surface gives no id (its activity folds onto one row). The widget
+    /// uses it to target a click — raising the exact browser tab — and only browser rows
+    /// act on it; for everything else it's display-inert metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Display label — the adapter's `source_label` (`"chatgpt web"`) or the surface
     /// name, numbered when a project has several of the same kind (`"terminal 1"`).
     pub label: String,
@@ -257,15 +264,20 @@ impl ProjectState {
     /// Render the sources oldest-first, numbering duplicates of the same base label
     /// (`terminal 1`, `terminal 2`) so concurrent same-kind sessions read distinctly.
     fn source_snapshots(&self) -> Vec<SourceSnapshot> {
-        let mut srcs: Vec<&SourceState> = self.sources.values().collect();
-        srcs.sort_by(|a, b| a.start.cmp(&b.start).then(a.base_label().cmp(&b.base_label())));
+        // Carry the map key alongside each state — its id half (after the unit
+        // separator) is the stable per-instance source id the widget needs to target a
+        // click. The values' display order is unchanged (oldest-first, then base label).
+        let mut srcs: Vec<(&String, &SourceState)> = self.sources.iter().collect();
+        srcs.sort_by(|(_, a), (_, b)| {
+            a.start.cmp(&b.start).then(a.base_label().cmp(&b.base_label()))
+        });
         let mut counts: HashMap<String, usize> = HashMap::new();
-        for s in &srcs {
+        for (_, s) in &srcs {
             *counts.entry(s.base_label()).or_default() += 1;
         }
         let mut seen: HashMap<String, usize> = HashMap::new();
         srcs.into_iter()
-            .map(|s| {
+            .map(|(key, s)| {
                 let base = s.base_label();
                 let label = if counts[&base] > 1 {
                     let n = seen.entry(base.clone()).or_insert(0);
@@ -274,8 +286,16 @@ impl ProjectState {
                 } else {
                     base
                 };
+                // `source_key` is `"<tag>\u{1f}<id>"`; an empty id (surface gives none)
+                // → `None`, never an empty string the frontend would treat as clickable.
+                let source = key
+                    .split_once('\u{1f}')
+                    .map(|(_, id)| id)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
                 SourceSnapshot {
                     surface: s.surface,
+                    source,
                     label,
                     status: s.status,
                     status_since: s.status_since,
@@ -404,10 +424,11 @@ impl Segmenter {
     }
 
     /// Is this a *you-acted* event — explicit human intent that switches immediately
-    /// and marks the block *present* (§7 top tier)? A `Prompt` (you typed) or a
-    /// `SessionStart` (you launched Claude here), at primary confidence.
+    /// and marks the block *present* (§7 top tier)? A `Prompt` (you typed), a
+    /// `SessionStart` (you launched Claude here), or a `Select` (you clicked a source
+    /// row to pull it into focus), at primary confidence.
     fn is_acted(&self, ev: &WorkEvent) -> bool {
-        matches!(ev.kind, WorkKind::Prompt | WorkKind::SessionStart)
+        matches!(ev.kind, WorkKind::Prompt | WorkKind::SessionStart | WorkKind::Select)
             && ev.confidence >= self.config.corroborator_confidence_cutoff
     }
 
@@ -537,12 +558,15 @@ impl Segmenter {
                 | WorkKind::ToolUse
                 | WorkKind::Active
                 | WorkKind::AwaitingInput
+                | WorkKind::Select
         );
         let key = source_key(ev);
         let desired = match ev.kind {
             WorkKind::AwaitingInput => Some(Status::AwaitingInput),
             WorkKind::Idle => Some(Status::Idle),
-            WorkKind::Prompt | WorkKind::ToolUse | WorkKind::SessionStart => Some(Status::Active),
+            WorkKind::Prompt | WorkKind::ToolUse | WorkKind::SessionStart | WorkKind::Select => {
+                Some(Status::Active)
+            }
             // Generic activity is a *weak* active signal — but only on Claude Code,
             // where a turn ends with the `Stop` hook setting awaiting_input and the
             // trailing end-of-turn transcript write lands a beat later as a generic
@@ -1334,6 +1358,43 @@ mod tests {
         browser.surface = Surface::Browser;
         s.ingest(&browser);
         assert_eq!(source_labels(&s, "whence"), vec!["claude code", "chatgpt web"]);
+    }
+
+    #[test]
+    fn snapshot_surfaces_the_per_instance_source_id() {
+        // The id half of the source key is surfaced on the snapshot so the widget can
+        // target a click (raise the exact browser tab). A sourceless surface stays `None`.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        let mut browser = ev_src(0, "whence", "https://claude.ai/project/p1", Some("claude web"));
+        browser.surface = Surface::Browser;
+        s.ingest(&browser);
+        s.ingest(&ev(10, "waid")); // sourceless Claude Code activity → no id to surface
+        let snap = s.snapshot();
+        let whence = snap.projects.iter().find(|x| x.project == "whence").unwrap();
+        assert_eq!(whence.sources[0].source.as_deref(), Some("https://claude.ai/project/p1"));
+        let waid = snap.projects.iter().find(|x| x.project == "waid").unwrap();
+        assert_eq!(waid.sources[0].source, None);
+    }
+
+    #[test]
+    fn select_switches_focus_immediately_and_marks_present() {
+        // Clicking a source row (a `Select`) is a you-acted override: it switches the
+        // active project with no debounce and marks the new block present, exactly like a
+        // prompt — even straight off an autonomous block on another project.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "waid")); // autonomous activity opens a waid block
+        s.ingest(&ev(30, "waid"));
+        let mut select = ev_src(40, "whence", "https://claude.ai/project/p1", Some("claude web"));
+        select.surface = Surface::Browser;
+        select.kind = WorkKind::Select;
+        let switch = s.ingest(&select);
+        // Old waid block closed at its last activity; new whence block opened at t=40.
+        let blocks = closed(&switch);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].project, "waid");
+        assert_eq!(opened(&switch), vec!["whence"]);
+        assert_eq!(active(&s).as_deref(), Some("whence"));
+        assert_eq!(presence_of(&s, "whence"), Some(Presence::Present));
     }
 
     #[test]

@@ -41,13 +41,38 @@
 //!   * [`serve`] — the thin impure shell: bind `tiny_http`, read bodies, drive the
 //!     two above, send. It owns the per-conversation turn-count memory.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::browser_map::MappingStore;
 use super::{Surface, WorkEvent, WorkKind};
+
+/// Pending "raise this tab" requests — normalized conversation URLs the widget asked
+/// to surface, drained by the extension's poll (`GET /raise`). Loopback, in-memory,
+/// bounded: a manual navigation affordance, not a log. Shared between a Tauri command
+/// (writer, via `enqueue_raise`) and the receiver thread (drainer).
+pub type RaiseQueue = Arc<Mutex<VecDeque<String>>>;
+
+/// Cap on pending raises — a backstop against an extension that never polls (Whence
+/// not running, browser closed). A click is only ever useful for a few seconds, so a
+/// small bound is plenty; the oldest fall off.
+const RAISE_QUEUE_CAP: usize = 16;
+
+/// Enqueue a normalized URL for the extension to raise. Newest-click-wins: a repeated
+/// target moves to the back rather than queueing twice. A poisoned lock is swallowed
+/// (the raise is simply lost) — never panic a command over a navigation nicety.
+pub fn enqueue_raise(q: &RaiseQueue, url: String) {
+    if let Ok(mut q) = q.lock() {
+        q.retain(|u| u != &url);
+        q.push_back(url);
+        while q.len() > RAISE_QUEUE_CAP {
+            q.pop_front();
+        }
+    }
+}
 
 /// The content-script payload. Forward-compatible (unknown fields ignored), like the
 /// Claude hook payload — provider markup churns, so every field is optional and a
@@ -358,6 +383,7 @@ pub fn serve(
     tx: UnboundedSender<WorkEvent>,
     mut store: MappingStore,
     addr: &str,
+    raise_q: RaiseQueue,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind browser receiver on {addr}: {e}"))?;
@@ -367,6 +393,25 @@ pub fn serve(
         .spawn(move || {
             let mut last_turn: HashMap<String, u32> = HashMap::new();
             for mut req in server.incoming_requests() {
+                // Back-channel: the extension polls here for tabs the widget asked to
+                // raise. Drain-on-read — each target is delivered once, so a raise
+                // never re-fires on the next poll. No CORS header needed: the poll
+                // fetch is to a `host_permissions` origin (127.0.0.1), same as the POST.
+                if req.method() == &tiny_http::Method::Get && req.url().starts_with("/raise") {
+                    let urls: Vec<String> = raise_q
+                        .lock()
+                        .map(|mut q| q.drain(..).collect())
+                        .unwrap_or_default();
+                    let body = serde_json::json!({ "raise": urls }).to_string();
+                    let hdr = tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"application/json"[..],
+                    )
+                    .expect("static header is valid");
+                    let _ = req.respond(tiny_http::Response::from_string(body).with_header(hdr));
+                    continue;
+                }
+
                 let mut body = String::new();
                 if req.as_reader().read_to_string(&mut body).is_ok() {
                     if let Ok(payload) = serde_json::from_str::<BrowserPayload>(&body) {
@@ -389,6 +434,27 @@ pub fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raise_queue_dedupes_and_drains_once() {
+        let q: RaiseQueue = Arc::new(Mutex::new(VecDeque::new()));
+        enqueue_raise(&q, "https://claude.ai/project/a".into());
+        enqueue_raise(&q, "https://claude.ai/project/b".into());
+        // A repeat moves to the back rather than queueing twice (newest click wins).
+        enqueue_raise(&q, "https://claude.ai/project/a".into());
+
+        // Drain-on-read: every pending target comes out once, in order...
+        let drained: Vec<String> = q.lock().unwrap().drain(..).collect();
+        assert_eq!(
+            drained,
+            vec![
+                "https://claude.ai/project/b".to_string(),
+                "https://claude.ai/project/a".to_string(),
+            ]
+        );
+        // ...and a second drain is empty — a raise never re-fires on the next poll.
+        assert!(q.lock().unwrap().drain(..).next().is_none());
+    }
 
     const NOW: &str = "2026-06-26T12:00:00Z";
 

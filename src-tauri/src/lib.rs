@@ -68,11 +68,21 @@ pub fn run() {
             let neuroskill_status: neuroskill::health::SharedStatus =
                 Arc::new(Mutex::new(neuroskill::health::NeuroskillStatus::default()));
 
+            // The core event channel and the browser raise queue are created here (above
+            // `manage`) so a clone of each can live in `AppState`: `focus_source` injects
+            // a synthetic event on `tx` and enqueues a tab raise. `rx` is moved into the
+            // core task below.
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<adapters::WorkEvent>();
+            let raise_queue: adapters::browser::RaiseQueue =
+                Arc::new(Mutex::new(std::collections::VecDeque::new()));
+
             app.manage(AppState {
                 snapshot: shared.clone(),
                 data_dir: data_dir.clone(),
                 settings: settings_state.clone(),
                 neuroskill: neuroskill_status.clone(),
+                tx: tx.clone(),
+                raise_queue: raise_queue.clone(),
             });
 
             // NeuroSkill connection health: an independent probe loop that keeps the
@@ -91,7 +101,8 @@ pub fn run() {
             // the task's lifetime (dropping it stops watching).
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                // `tx`/`rx` and `raise_queue` are the hoisted handles (a `tx` clone +
+                // the queue already live in `AppState`); this `move` closure owns them.
                 let aliases = loaded.project_aliases.clone();
 
                 // Hooks receiver (v1.5): clone the sender *before* `watch` consumes
@@ -134,9 +145,12 @@ pub fn run() {
                     let map_path = adapters::browser_map::mapping_path(&data_dir);
                     match adapters::browser_map::MappingStore::load(&map_path) {
                         Ok(store) => {
-                            if let Err(e) =
-                                adapters::browser::serve(tx.clone(), store, &browser_addr)
-                            {
+                            if let Err(e) = adapters::browser::serve(
+                                tx.clone(),
+                                store,
+                                &browser_addr,
+                                raise_queue.clone(),
+                            ) {
                                 eprintln!("whence: browser receiver not started: {e}");
                             }
                         }
@@ -158,6 +172,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_focus_state,
+            commands::focus_source,
             commands::get_today_blocks,
             commands::get_focus_intensity,
             commands::get_neuroskill_status,

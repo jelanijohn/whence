@@ -176,5 +176,30 @@
     }
   }, SAMPLE_MS);
 
+  // Keepalive port — keeps the background service worker (and its `/raise` poll) alive
+  // while this provider tab is open, so a click in the widget can raise this tab within
+  // a poll cadence even when the tab is otherwise quiet. Self-healing: reconnects if the
+  // worker recycled the port. Carries no data — only its liveness matters.
+  let keepalivePort = null;
+  function connectKeepalive() {
+    try {
+      keepalivePort = chrome.runtime.connect({ name: "whence-keepalive" });
+      keepalivePort.onDisconnect.addListener(() => {
+        keepalivePort = null;
+      });
+    } catch (_) {
+      keepalivePort = null; // worker reloading — the interval below retries.
+    }
+  }
+  connectKeepalive();
+  setInterval(() => {
+    if (!keepalivePort) connectKeepalive();
+    try {
+      keepalivePort && keepalivePort.postMessage({ t: "ping" });
+    } catch (_) {
+      keepalivePort = null; // port died mid-send — reconnect next tick.
+    }
+  }, 20000); // < the 30s SW idle timer
+
   tick(); // first observation
 })();

@@ -39,6 +39,12 @@ pub enum WorkKind {
     Active,
     Idle,
     SessionEnd,
+    /// A deliberate human override — the user clicked a source row in the widget to
+    /// pull that project into focus (§3's "humans promote" gate made first-class). It
+    /// is *not* a `Prompt`: modeling it honestly as its own kind keeps the event
+    /// stream and timeline truthful about *why* a block opened. Treated as you-acted
+    /// evidence (immediate switch, marks the block `present`) by the engine.
+    Select,
 }
 
 impl WorkKind {
@@ -48,7 +54,11 @@ impl WorkKind {
     pub fn is_focus_evidence(self) -> bool {
         matches!(
             self,
-            WorkKind::SessionStart | WorkKind::Prompt | WorkKind::ToolUse | WorkKind::Active
+            WorkKind::SessionStart
+                | WorkKind::Prompt
+                | WorkKind::ToolUse
+                | WorkKind::Active
+                | WorkKind::Select
         )
     }
 }
@@ -184,6 +194,7 @@ mod tests {
     fn work_kind_focus_vs_status() {
         assert!(WorkKind::Prompt.is_focus_evidence());
         assert!(WorkKind::Active.is_focus_evidence());
+        assert!(WorkKind::Select.is_focus_evidence());
         assert!(!WorkKind::AwaitingInput.is_focus_evidence());
         assert!(!WorkKind::Idle.is_focus_evidence());
     }
