@@ -149,7 +149,15 @@
         title={view === "timeline" ? "Collapse" : "Today's blocks"}
         onclick={() => setView("timeline")}
       >
-        {view === "timeline" ? "expand_less" : "expand_more"}
+        calendar_view_day
+      </button>
+      <button
+        class="msym"
+        style="color: var(--fg3); font-size: 18px; cursor: pointer;"
+        title="Close"
+        onclick={() => getCurrentWindow().close()}
+      >
+        close
       </button>
     </div>
   </header>
