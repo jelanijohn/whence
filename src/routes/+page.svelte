@@ -6,6 +6,7 @@
     startNeuroskill,
     stopNeuroskill,
   } from "$lib/stores/neuroskill.svelte";
+  import { appearance, loadAppearance } from "$lib/stores/appearance.svelte";
   import { getTodayBlocks, getFocusIntensity } from "$lib/tauri";
   import type { FocusBlock } from "$lib/types";
   import type { Status } from "$lib/types";
@@ -88,6 +89,11 @@
     return () => stopNeuroskill();
   });
 
+  // Hydrate the widget opacity once; the Settings slider then drives it live.
+  $effect(() => {
+    loadAppearance();
+  });
+
   // Keep the window sized to the current view + live project rows + expanded sources.
   $effect(() => {
     resize(windowHeight(view, projects.length, expandedSourceCount));
@@ -114,7 +120,7 @@
   }
 </script>
 
-<div class="panel select-none">
+<div class="panel select-none" style="opacity: {appearance.opacity};">
   <!-- App title bar. The whole bar moves the window (data-tauri-drag-region). -->
   <header
     data-tauri-drag-region

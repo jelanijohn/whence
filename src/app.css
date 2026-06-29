@@ -148,6 +148,30 @@ body {
 .wn-input::placeholder {
   color: var(--fg4);
 }
+
+/* Range slider — used by the Appearance opacity control. Accent thumb on a soft
+   track; WebKit-only pseudo-elements, which is all the widget runtime needs. */
+.wn-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--border);
+  outline: none;
+  cursor: pointer;
+}
+.wn-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+.wn-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
 .wn-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-tint);

@@ -103,4 +103,5 @@ export interface Settings {
   idleTimeoutSeconds: number; // gap that ends a block
   corroboratorConfidenceCutoff: number; // ≥ this = primary signal; below = weak hint (§7)
   attentionRecencySeconds: number; // present-vs-running boundary: act recency window (§7)
+  widgetOpacity: number; // whole-widget opacity, 0.3..1 (1 = opaque); constant, frontend-only
 }

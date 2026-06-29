@@ -99,6 +99,13 @@ pub struct Settings {
     /// *running*). ~120 (§7). Defaulted so existing settings files load.
     #[serde(default = "default_attention_recency")]
     pub attention_recency_seconds: i64,
+    /// Whole-widget opacity, `0.3..=1.0` (1.0 = fully opaque). A *constant*
+    /// user-set value — never adaptive — so the widget stays glanceable and calm
+    /// (principle #3). Floored at 0.3 in the UI so it never becomes unreadable or
+    /// effectively un-clickable. Frontend-only: applied to the `.panel`, no backend
+    /// effect. Defaulted so existing settings files load.
+    #[serde(default = "default_widget_opacity")]
+    pub widget_opacity: f64,
 }
 
 fn default_corroborator_cutoff() -> f64 {
@@ -107,6 +114,10 @@ fn default_corroborator_cutoff() -> f64 {
 
 fn default_attention_recency() -> i64 {
     120
+}
+
+fn default_widget_opacity() -> f64 {
+    1.0
 }
 
 impl Default for Settings {
@@ -129,6 +140,7 @@ impl Default for Settings {
             idle_timeout_seconds: 360,
             corroborator_confidence_cutoff: 0.6,
             attention_recency_seconds: 120,
+            widget_opacity: 1.0,
         }
     }
 }

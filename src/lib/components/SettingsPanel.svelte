@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import {
     getSettings,
     setSettings,
@@ -9,6 +9,7 @@
   } from "$lib/tauri";
   import type { Settings } from "$lib/types";
   import { neuroskill } from "$lib/stores/neuroskill.svelte";
+  import { appearance, clampOpacity, MIN_OPACITY } from "$lib/stores/appearance.svelte";
   import Toggle from "./Toggle.svelte";
 
   // The settings form. Self-contained like BlockTimeline: loads its own state on
@@ -31,6 +32,7 @@
     idleTimeoutSeconds: number;
     corroboratorConfidenceCutoff: number;
     attentionRecencySeconds: number;
+    widgetOpacity: number;
     aliases: { key: string; value: string }[];
   };
 
@@ -57,6 +59,7 @@
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
       attentionRecencySeconds: s.attentionRecencySeconds,
+      widgetOpacity: s.widgetOpacity,
       aliases: Object.entries(s.projectAliases ?? {}).map(([key, value]) => ({ key, value })),
     };
   }
@@ -93,6 +96,7 @@
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
       corroboratorConfidenceCutoff: clamp01(d.corroboratorConfidenceCutoff),
       attentionRecencySeconds: clampSecs(d.attentionRecencySeconds),
+      widgetOpacity: clampOpacity(d.widgetOpacity),
     };
   }
 
@@ -115,6 +119,7 @@
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
       attentionRecencySeconds: s.attentionRecencySeconds,
+      widgetOpacity: s.widgetOpacity,
       aliases,
     });
   }
@@ -122,6 +127,17 @@
   const dirty = $derived(
     draft && baseline ? canonical(toSettings(draft)) !== canonical(baseline) : false,
   );
+
+  // Opacity is the one setting with an immediate visual effect, so we live-preview
+  // it: mirror the draft into the appearance store (which drives the real `.panel`)
+  // while this panel is open, and restore the saved value on close so an unsaved
+  // drag reverts. Save persists baseline, so a saved change sticks past unmount.
+  $effect(() => {
+    if (draft) appearance.opacity = clampOpacity(draft.widgetOpacity);
+  });
+  onDestroy(() => {
+    if (baseline) appearance.opacity = clampOpacity(baseline.widgetOpacity);
+  });
 
   // Live NeuroSkill connection health (backend probe) — the in-panel echo of the
   // header indicator, so you can see the effect of an endpoint/token edit here.
@@ -225,6 +241,30 @@
     <div class="flex items-center justify-between">
       <span style="color: var(--fg-body); font-size: 13px;">Launch at login</span>
       <Toggle bind:checked={draft.autostart} label="Launch at login" />
+    </div>
+
+    <!-- Appearance — whole-widget opacity. A constant value (not adaptive), so the
+         widget stays glanceable; floored at 30% so it never goes unreadable. The
+         slider live-previews as it moves (see the $effect above). -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Appearance</p>
+      <div class="flex items-center justify-between gap-3">
+        <span style="color: var(--fg-body); font-size: 13px;" title="Whole-widget opacity. Lower = more see-through; floored at 30% so it stays readable.">Widget opacity</span>
+        <span class="inline-flex items-center gap-2" style="flex: 1; max-width: 168px;">
+          <input
+            class="wn-range"
+            style="flex: 1; min-width: 0;"
+            type="range"
+            min={MIN_OPACITY}
+            max="1"
+            step="0.05"
+            bind:value={draft.widgetOpacity}
+          />
+          <span class="tabular-nums" style="color: var(--fg3); font-size: 12px; width: 34px; text-align: right;"
+            >{Math.round(draft.widgetOpacity * 100)}%</span
+          >
+        </span>
+      </div>
     </div>
 
     <!-- Segmenter -->

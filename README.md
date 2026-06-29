@@ -110,9 +110,10 @@ src-tauri/src/
     health.rs                   Periodic side-effect-free connection probe + status.
     eeg.rs                      Optional read-only intensity read-back + activity.sqlite
                                   path resolution (eeg-readback feature).
-extension/                    First-party MV3 browser extension (claude.ai /
-                                chatgpt.com) → the browser receiver. providers.js
-                                centralizes the brittle DOM selectors; loaded unpacked.
+extension/                    First-party MV3 browser extension (claude.ai chat +
+                                Claude Design, chatgpt.com) → the browser receiver.
+                                providers.js centralizes the brittle DOM selectors,
+                                keyed by host+path; loaded unpacked.
 ```
 
 `engine/segment.rs` is the heart and is kept **pure** — feed it a `WorkEvent`
@@ -177,9 +178,14 @@ provider's project id + name — a self-declared marker, never chat content or w
 tab is focused — and POSTs them to a loopback `tiny_http` listener (default
 `127.0.0.1:18452`, override via `browser_listen_addr_override`). The **daemon** owns
 resolution: a normalized-URL fast path, then the provider project id (stable across
-renames), else a fresh mint with `slug = slugify(name)`. The provider→slug map is a
-hand-editable TOML (`browser_mapping.toml`, surfaced in Settings) written
-format-preservingly via `toml_edit`. A chat filed under no project resolves to
+renames), else a fresh mint with `slug = slugify(name)`. Providers are selected by
+**host + path-prefix**, so one host can carry more than one surface: `claude.ai`
+serves both Claude chat and **Claude Design** (`/design`), each modeled as its own
+provider id with its own keyspace and shown as a distinct source row (`claude web`
+vs `claude design`) — converging with the filesystem project at the slug layer, not
+the provider layer. Extension and daemon apply the same host+path rule. The
+provider→slug map is a hand-editable TOML (`browser_mapping.toml`, surfaced in
+Settings) written format-preservingly via `toml_edit`. A chat filed under no project resolves to
 `project: None` and is dropped (ambient, not an error). It's **opt-in (default off)**
 via the `browser` setting and needs the extension installed; the resolution and
 event mapping are fixture-tested, only the socket and store I/O are impure. The
@@ -278,8 +284,8 @@ sources — plus an expanded today's-blocks timeline), the optional EEG intensit
 `awaiting_input` status (v1.5, opt-in), Ollama inference liveness (v1.5,
 low-confidence status), the terminal cwd corroborator (v1.5, opt-in), the
 NeuroSkill connection-health indicator (v1.5), and the browser LLM adapter —
-claude.ai / chatgpt.com sessions via a first-party extension (opt-in,
-originating-capable).
+claude.ai (chat + Claude Design) / chatgpt.com sessions via a first-party extension
+(opt-in, originating-capable).
 Planned: debounce calibration on real data (v1), then Who Am I inbox candidates
 and WAID intention-vs-reality (v2). See [`whence-spec.md`](whence-spec.md) §13.
 
