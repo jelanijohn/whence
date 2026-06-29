@@ -10,6 +10,7 @@ mod engine;
 mod orchestrator;
 mod neuroskill;
 mod settings;
+mod tray;
 
 use std::sync::{Arc, Mutex};
 
@@ -55,6 +56,11 @@ pub fn run() {
                 let _ = win.set_always_on_top(loaded.always_on_top);
                 let _ = win.set_visible_on_all_workspaces(loaded.always_present);
             }
+
+            // System tray: the only affordance for un-hiding the decorationless
+            // widget and the canonical Quit path. Bundle icons exist by now, so
+            // `default_window_icon()` is populated.
+            tray::init(app.handle())?;
 
             let shared: orchestrator::SharedSnapshot =
                 Arc::new(Mutex::new(FocusSnapshot { projects: Vec::new() }));
