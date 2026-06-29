@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::orchestrator::SharedSnapshot;
@@ -137,6 +137,15 @@ pub fn set_settings(
     if let Ok(mut g) = state.settings.lock() {
         *g = settings.clone();
     }
+
+    // Apply the window flags to the live `main` window. Idempotent, so no
+    // change-detection is needed; `set_visible_on_all_workspaces` is best-effort
+    // (unsupported on Windows/mobile) and must never block a settings save.
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_always_on_top(settings.always_on_top);
+        let _ = win.set_visible_on_all_workspaces(settings.always_present);
+    }
+
     Ok(settings)
 }
 

@@ -182,7 +182,7 @@
       style="border-top: 1px solid var(--border-soft);"
     >
       {#if view === "timeline"}
-        <div class="overflow-y-auto pt-2">
+        <div class="wn-scroll overflow-y-auto pt-2">
           <BlockTimeline {blocks} />
         </div>
       {:else if view === "settings"}

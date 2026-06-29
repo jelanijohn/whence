@@ -33,6 +33,8 @@
     corroboratorConfidenceCutoff: number;
     attentionRecencySeconds: number;
     widgetOpacity: number;
+    alwaysOnTop: boolean;
+    alwaysPresent: boolean;
     aliases: { key: string; value: string }[];
   };
 
@@ -60,6 +62,8 @@
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
       attentionRecencySeconds: s.attentionRecencySeconds,
       widgetOpacity: s.widgetOpacity,
+      alwaysOnTop: s.alwaysOnTop,
+      alwaysPresent: s.alwaysPresent,
       aliases: Object.entries(s.projectAliases ?? {}).map(([key, value]) => ({ key, value })),
     };
   }
@@ -97,6 +101,8 @@
       corroboratorConfidenceCutoff: clamp01(d.corroboratorConfidenceCutoff),
       attentionRecencySeconds: clampSecs(d.attentionRecencySeconds),
       widgetOpacity: clampOpacity(d.widgetOpacity),
+      alwaysOnTop: d.alwaysOnTop,
+      alwaysPresent: d.alwaysPresent,
     };
   }
 
@@ -120,6 +126,8 @@
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
       attentionRecencySeconds: s.attentionRecencySeconds,
       widgetOpacity: s.widgetOpacity,
+      alwaysOnTop: s.alwaysOnTop,
+      alwaysPresent: s.alwaysPresent,
       aliases,
     });
   }
@@ -236,11 +244,29 @@
     <p class="px-3 py-2" style="color: var(--fg3); font-size: 12px;">Loading settings…</p>
   {:else if draft}
     <!-- Scrollable body; the Save bar below stays pinned. -->
-    <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 py-2">
+    <div class="wn-scroll flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 py-2">
     <!-- General -->
     <div class="flex items-center justify-between">
       <span style="color: var(--fg-body); font-size: 13px;">Launch at login</span>
       <Toggle bind:checked={draft.autostart} label="Launch at login" />
+    </div>
+
+    <!-- Window — float-on-top + cross-desktop presence. Applied on Save (the
+         set_settings side-effect path), mirroring autostart. -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Window</p>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Always on top</span>
+        <Toggle bind:checked={draft.alwaysOnTop} label="Always on top" />
+      </div>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Always present</span>
+        <Toggle bind:checked={draft.alwaysPresent} label="Always present" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Keeps the widget in view when you switch virtual desktops. macOS and Linux
+        (GNOME/libunity) only — no effect on Windows.
+      </p>
     </div>
 
     <!-- Appearance — whole-widget opacity. A constant value (not adaptive), so the

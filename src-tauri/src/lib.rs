@@ -47,6 +47,15 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).ok();
 
             let loaded = settings::load(&data_dir);
+
+            // Apply the persisted window flags once the main window exists, so the
+            // setting (not just `tauri.conf.json`) is the single source of truth.
+            // `set_visible_on_all_workspaces` is best-effort (no-op on Windows/mobile).
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_always_on_top(loaded.always_on_top);
+                let _ = win.set_visible_on_all_workspaces(loaded.always_present);
+            }
+
             let shared: orchestrator::SharedSnapshot =
                 Arc::new(Mutex::new(FocusSnapshot { projects: Vec::new() }));
             let settings_state = Arc::new(Mutex::new(loaded.clone()));

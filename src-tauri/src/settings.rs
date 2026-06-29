@@ -106,10 +106,26 @@ pub struct Settings {
     /// effect. Defaulted so existing settings files load.
     #[serde(default = "default_widget_opacity")]
     pub widget_opacity: f64,
+    /// Float the widget above other windows. Default **true** (preserves the
+    /// conf-set behavior). Applied to the main window at startup and on save.
+    /// Cross-platform. Named default so settings files predating this field still
+    /// load as on, not off (a bare `serde(default)` bool is false).
+    #[serde(default = "default_always_on_top")]
+    pub always_on_top: bool,
+    /// Keep the widget in view across virtual desktops / workspaces. Opt-in,
+    /// default false. Maps to Tauri's `set_visible_on_all_workspaces`.
+    /// **Platform-specific:** macOS and Linux (libunity DEs, e.g. GNOME) only; a
+    /// no-op on Windows/mobile.
+    #[serde(default)]
+    pub always_present: bool,
 }
 
 fn default_corroborator_cutoff() -> f64 {
     0.6
+}
+
+fn default_always_on_top() -> bool {
+    true
 }
 
 fn default_attention_recency() -> i64 {
@@ -141,6 +157,8 @@ impl Default for Settings {
             corroborator_confidence_cutoff: 0.6,
             attention_recency_seconds: 120,
             widget_opacity: 1.0,
+            always_on_top: true,
+            always_present: false,
         }
     }
 }
