@@ -86,6 +86,9 @@ src-tauri/src/
                                   install/uninstall_claude_hooks.
   orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
   settings.rs                   Tiny JSON settings file in the app data dir.
+  tray.rs                       System tray: restore the widget (left-click) + Quit
+                                  (right-click menu) — the only un-hide path for the
+                                  decorationless, skip-taskbar widget.
   adapters/
     mod.rs                      WorkEvent model (incl. per-instance source id) +
                                   adapter contract + shared slugify.
