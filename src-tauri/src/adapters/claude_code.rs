@@ -12,21 +12,130 @@
 //! mtimes can infer. This module ships first because it works immediately.
 //!
 //! The watcher must be kept alive by the caller (dropping it stops watching), so
-//! [`watch`] returns the `RecommendedWatcher` handle to store in app state.
+//! [`watch`] returns the watcher handle to store in app state.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{slug_from_transcript_dir, slugify, Surface, WorkEvent, WorkKind};
 
-/// `~/.claude/projects` — the root of Claude Code's per-project transcripts.
-pub fn transcripts_root() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    Some(home.join(".claude").join("projects"))
+/// The user's home directory. `HOME` on Unix; Windows doesn't set it, so fall back
+/// to `USERPROFILE` — the assumption that Whence always runs under WSL2 (where
+/// `HOME` exists) died when we started shipping native builds.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Resolve the Claude Code config dir (the `.claude` folder holding `projects/`
+/// and `settings.json`) — shared by the transcript watcher and the hooks
+/// installer so both always target the *same* Claude Code installation:
+///
+/// 1. **Explicit override** (`claude_dir` setting) — the user's last word.
+/// 2. **Native home** (`$HOME`/`%USERPROFILE%`), if it actually has a
+///    `projects/` dir — i.e. Claude Code has run on this OS.
+/// 3. **WSL discovery** (Windows only) — Claude Code often runs *inside* WSL
+///    while Whence runs on the host; walk `\\wsl$\<distro>` home dirs for a
+///    `.claude/projects` tree.
+/// 4. The native home again, existing or not — first-run fallback (the watcher
+///    creates `projects/` so the recursive watch has something to attach to).
+pub fn claude_dir(override_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(p) = override_path {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    let native = home_dir().map(|h| h.join(".claude"));
+    if let Some(dir) = &native {
+        if dir.join("projects").is_dir() {
+            return Some(dir.clone());
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = wsl_claude_dir() {
+        return Some(dir);
+    }
+    native
+}
+
+/// `<claude_dir>/projects` — the root of Claude Code's per-project transcripts.
+pub fn transcripts_root(claude_dir_override: Option<&str>) -> Option<PathBuf> {
+    Some(claude_dir(claude_dir_override)?.join("projects"))
+}
+
+/// Find a `.claude` dir inside a WSL distro from the Windows host, via the
+/// `\\wsl$\` filesystem bridge. Checks `/root` first (WSL setups often run as
+/// root), then each `/home/<user>`, per distro in `wsl -l` order (default distro
+/// first). Only returns a dir that already has `projects/` — existence is the
+/// signal that Claude Code actually runs there.
+#[cfg(target_os = "windows")]
+fn wsl_claude_dir() -> Option<PathBuf> {
+    for distro in wsl_distros() {
+        let fs_root = PathBuf::from(format!(r"\\wsl$\{distro}"));
+        let mut homes = vec![fs_root.join("root")];
+        if let Ok(entries) = std::fs::read_dir(fs_root.join("home")) {
+            let mut users: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            users.sort();
+            homes.extend(users);
+        }
+        for home in homes {
+            let dir = home.join(".claude");
+            if dir.join("projects").is_dir() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+/// Installed WSL distro names via `wsl.exe -l -q` (default distro listed first).
+/// Empty when WSL isn't installed. `wsl.exe` emits UTF-16LE unless `WSL_UTF8=1`,
+/// so sniff for NUL bytes and decode accordingly.
+#[cfg(target_os = "windows")]
+fn wsl_distros() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    // Don't flash a console window from a GUI app.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(out) = std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = if out.stdout.iter().take(64).any(|b| *b == 0) {
+        let wide: Vec<u16> = out
+            .stdout
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&wide)
+    } else {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    text.lines()
+        .map(|l| l.trim_matches(['\0', ' ', '\r']).to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Is this a network (UNC) path — e.g. `\\wsl$\<distro>\...`? OS file-change
+/// notifications don't traverse the 9P bridge, so a watcher on such a root must
+/// poll. Always false on Unix (no path prefixes).
+fn is_network_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    match path.components().next() {
+        Some(Component::Prefix(pre)) => {
+            matches!(pre.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+        }
+        _ => false,
+    }
 }
 
 /// Start watching the transcript tree, emitting `WorkEvent`s on `tx`. Returns the
@@ -37,11 +146,17 @@ pub fn transcripts_root() -> Option<PathBuf> {
 /// `aliases` maps transcript **directory name** → canonical slug (user override).
 /// The watcher also keeps a per-directory **cache** of cwd-derived slugs so it
 /// reads each transcript's `cwd` only once, not on every append.
+///
+/// Boxed because the backend varies: a native root gets the OS-notification
+/// watcher; a network root (a `\\wsl$\` tree, where those notifications never
+/// arrive) gets a mtime-polling watcher instead.
 pub fn watch(
     tx: UnboundedSender<WorkEvent>,
     aliases: HashMap<String, String>,
-) -> Result<RecommendedWatcher, String> {
-    let root = transcripts_root().ok_or("could not resolve $HOME for ~/.claude/projects")?;
+    claude_dir_override: Option<&str>,
+) -> Result<Box<dyn Watcher + Send>, String> {
+    let root = transcripts_root(claude_dir_override)
+        .ok_or("could not resolve a home directory (HOME/USERPROFILE) for ~/.claude/projects")?;
     if !root.exists() {
         std::fs::create_dir_all(&root)
             .map_err(|e| format!("could not create {}: {e}", root.display()))?;
@@ -50,7 +165,7 @@ pub fn watch(
     // dir-name → slug, seeded empty; filled with stable (alias/cwd) resolutions so
     // we don't re-read a transcript's cwd on every subsequent append.
     let mut cache: HashMap<String, String> = HashMap::new();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+    let handler = move |res: notify::Result<Event>| {
         let Ok(event) = res else { return };
         let is_create = matches!(event.kind, EventKind::Create(_));
         let is_write = matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
@@ -64,8 +179,21 @@ pub fn watch(
                 let _ = tx.send(ev);
             }
         }
-    })
-    .map_err(|e| format!("could not create transcript watcher: {e}"))?;
+    };
+
+    let mut watcher: Box<dyn Watcher + Send> = if is_network_path(&root) {
+        let config = notify::Config::default()
+            .with_poll_interval(std::time::Duration::from_secs(2));
+        Box::new(
+            notify::PollWatcher::new(handler, config)
+                .map_err(|e| format!("could not create transcript poll watcher: {e}"))?,
+        )
+    } else {
+        Box::new(
+            notify::recommended_watcher(handler)
+                .map_err(|e| format!("could not create transcript watcher: {e}"))?,
+        )
+    };
 
     watcher
         .watch(&root, RecursiveMode::Recursive)
@@ -223,6 +351,28 @@ mod tests {
         assert_eq!(cache.get("-root-Projects-blapp-web").map(String::as_str), Some("blapp-web"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn claude_dir_override_wins() {
+        let d = claude_dir(Some("/custom/.claude")).unwrap();
+        assert_eq!(d, PathBuf::from("/custom/.claude"));
+        // Blank/whitespace override = "use default", not an empty path.
+        assert_ne!(claude_dir(Some("  ")), Some(PathBuf::from("")));
+    }
+
+    #[test]
+    fn network_path_detection() {
+        // Unix-style and relative paths are never network roots.
+        assert!(!is_network_path(Path::new("/root/.claude/projects")));
+        assert!(!is_network_path(Path::new("projects")));
+        // UNC prefixes only parse as such on Windows, where the poll fallback lives.
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_network_path(Path::new(r"\\wsl$\Ubuntu\root\.claude\projects")));
+            assert!(is_network_path(Path::new(r"\\wsl.localhost\Ubuntu\root\.claude")));
+            assert!(!is_network_path(Path::new(r"C:\Users\u\.claude\projects")));
+        }
     }
 
     #[test]

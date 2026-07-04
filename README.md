@@ -80,7 +80,7 @@ src/                          SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4
                                   NeuroskillStatusDot · SettingsPanel · Toggle · BrandMark.
 src-tauri/src/
   lib.rs                        Plugin + command + window registration; spawns core.
-  commands.rs                   get_focus_state · get_today_blocks ·
+  commands.rs                   get_focus_state · focus_source · get_today_blocks ·
                                   get_focus_intensity · get_neuroskill_status ·
                                   get_browser_mapping_path · get/set_settings ·
                                   install/uninstall_claude_hooks.
@@ -129,7 +129,12 @@ Adding a surface = adding an adapter; nothing else changes. The only live one is
 **Claude Code transcript watch** (zero-config): it watches
 `~/.claude/projects/<encoded-cwd>/*.jsonl` with the `notify` crate and reads the
 session's `cwd` for the project, new appended lines for activity, and prompt text
-for confidence.
+for confidence. The `.claude` root is auto-resolved: the native home
+(`$HOME`/`%USERPROFILE%`), or — when Whence runs natively on Windows while Claude
+Code runs inside WSL — a walk of the `\\wsl$\<distro>` homes for a
+`.claude/projects` tree (pin it with the `claude_dir` setting if discovery picks
+wrong). A network root like that gets a **polling** watcher, since OS file
+notifications never cross the 9P bridge.
 
 **Ollama liveness** (`ollama.rs`) is the second live surface — but a *status*
 surface, not an attribution one. It polls Ollama's `/api/ps` and watches a model's
@@ -169,7 +174,10 @@ between Claude Code *running* and *awaiting your input*. It's a small loopback
 fire-and-forget: `Stop`/`Notification` → `awaiting_input`, `UserPromptSubmit` →
 back to `active`. Installation is **opt-in** — `install_claude_hooks` (a button in
 Settings) does a merge-preserving write of the hook config into
-`~/.claude/settings.json`, and `uninstall_claude_hooks` round-trips it back out.
+`.claude/settings.json` — the *same* `.claude` dir the transcript watcher
+resolved, so on a Windows host with WSL Claude Code the hooks land in WSL's
+settings, where Claude Code actually reads them — and `uninstall_claude_hooks`
+round-trips it back out.
 The event-to-`WorkEvent` mapping is pure and fixture-tested; only the socket is
 impure.
 
@@ -189,7 +197,10 @@ vs `claude design`) — converging with the filesystem project at the slug layer
 the provider layer. Extension and daemon apply the same host+path rule. The
 provider→slug map is a hand-editable TOML (`browser_mapping.toml`, surfaced in
 Settings) written format-preservingly via `toml_edit`. A chat filed under no project resolves to
-`project: None` and is dropped (ambient, not an error). It's **opt-in (default off)**
+`project: None` and is dropped (ambient, not an error). Browser source rows are also
+the widget's one *clickable* surface: clicking one raises its tab (the extension
+polls a raise queue) and pins focus to that project via `focus_source` — a
+you-acted switch through the normal engine path. It's **opt-in (default off)**
 via the `browser` setting and needs the extension installed; the resolution and
 event mapping are fixture-tested, only the socket and store I/O are impure. The
 extension's DOM selectors are brittle by construction (provider markup churns) and
@@ -254,6 +265,7 @@ Prerequisites: Node 20+, pnpm, Rust toolchain, and the
 pnpm install            # one-time setup
 pnpm tauri dev          # run the widget (frontend + Rust backend)
 pnpm tauri:wsl          # same, with the dmabuf renderer disabled for WSL2
+pnpm tauri:dev2         # same, on port 1435 — run a second instance side by side
 pnpm check              # svelte-check (frontend types)
 ```
 
@@ -264,6 +276,9 @@ cd src-tauri && cargo test --features eeg-readback  # include the SQLite read-ba
 
 The dev server runs on **port 1425** (WAID uses 1420, so both widgets can run at
 once).
+
+Pushing a `v*` tag builds Windows / macOS / Linux installers via the release
+workflow (`.github/workflows/release.yml`).
 
 ### Plugins
 

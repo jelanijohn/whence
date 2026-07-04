@@ -108,11 +108,18 @@ pub fn run() {
                 // Hooks receiver (v1.5): clone the sender *before* `watch` consumes
                 // it, then bind the loopback endpoint. Non-fatal on failure — a
                 // taken port just means no live `awaiting_input`; transcript-watch
-                // still runs (degrade, don't crash).
+                // still runs (degrade, don't crash). The transcripts root lets the
+                // receiver rebase a payload's transcript_path when Claude Code runs
+                // in WSL but Whence on the Windows host (different filesystems).
                 let hook_addr = loaded.hook_listen_addr();
-                if let Err(e) =
-                    adapters::hooks::serve(tx.clone(), aliases.clone(), &hook_addr)
-                {
+                let transcripts_root =
+                    adapters::claude_code::transcripts_root(loaded.claude_dir.as_deref());
+                if let Err(e) = adapters::hooks::serve(
+                    tx.clone(),
+                    aliases.clone(),
+                    &hook_addr,
+                    transcripts_root,
+                ) {
                     eprintln!("whence: hook receiver not started: {e}");
                 }
 
@@ -158,7 +165,11 @@ pub fn run() {
                     }
                 }
 
-                let _watcher = match adapters::claude_code::watch(tx, aliases) {
+                let _watcher = match adapters::claude_code::watch(
+                    tx,
+                    aliases,
+                    loaded.claude_dir.as_deref(),
+                ) {
                     Ok(w) => w,
                     Err(e) => {
                         eprintln!("whence: transcript watcher failed to start: {e}");

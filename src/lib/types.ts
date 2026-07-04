@@ -93,6 +93,7 @@ export interface Settings {
   neuroskillEndpoint?: string | null; // override daemon URL; null = default :18444
   neuroskillTokenPath?: string | null; // override token file; null = auto (native → WSL2 host)
   neuroskillDataDir?: string | null; // override data dir (activity.sqlite); null = auto; powers the intensity meter
+  claudeDir?: string | null; // override the .claude dir (transcripts + hooks install); null = auto (native home → WSL distro walk on Windows)
   projectAliases: Record<string, string>; // transcript dir-name → canonical slug
   hookListenAddrOverride?: string | null; // override hook receiver bind; null = default 127.0.0.1:18450
   ollamaEnabled: boolean; // poll Ollama for inference liveness (low-confidence status only)

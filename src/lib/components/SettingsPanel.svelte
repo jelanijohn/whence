@@ -24,6 +24,7 @@
     neuroskillEndpoint: string;
     neuroskillTokenPath: string;
     neuroskillDataDir: string;
+    claudeDir: string;
     ollamaEnabled: boolean;
     ollamaEndpoint: string;
     terminalEnabled: boolean;
@@ -53,6 +54,7 @@
       neuroskillEndpoint: s.neuroskillEndpoint ?? "",
       neuroskillTokenPath: s.neuroskillTokenPath ?? "",
       neuroskillDataDir: s.neuroskillDataDir ?? "",
+      claudeDir: s.claudeDir ?? "",
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? "",
       terminalEnabled: s.terminalEnabled,
@@ -91,6 +93,7 @@
       neuroskillEndpoint: d.neuroskillEndpoint.trim() || null,
       neuroskillTokenPath: d.neuroskillTokenPath.trim() || null,
       neuroskillDataDir: d.neuroskillDataDir.trim() || null,
+      claudeDir: d.claudeDir.trim() || null,
       ollamaEnabled: d.ollamaEnabled,
       ollamaEndpoint: d.ollamaEndpoint.trim() || null,
       terminalEnabled: d.terminalEnabled,
@@ -117,6 +120,7 @@
       neuroskillEndpoint: s.neuroskillEndpoint ?? null,
       neuroskillTokenPath: s.neuroskillTokenPath ?? null,
       neuroskillDataDir: s.neuroskillDataDir ?? null,
+      claudeDir: s.claudeDir ?? null,
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? null,
       terminalEnabled: s.terminalEnabled,
@@ -477,7 +481,22 @@
       <p class="label" style="margin-top: 8px;">Claude Code hooks</p>
       <p style="color: var(--fg3); font-size: 11px;">
         Show <span style="color: var(--fg2);">waiting on you</span> the instant Claude finishes a turn.
-        Writes hooks into <span class="tabular-nums">~/.claude/settings.json</span> (opt-in, reversible).
+        Writes hooks into <span class="tabular-nums">.claude/settings.json</span> (opt-in, reversible).
+      </p>
+      <!-- One override for everything Claude Code: where transcripts are watched
+           AND where hooks install. Auto-discovery handles the common cases (native
+           home; WSL distro from a Windows host) — this pins the odd ones. -->
+      <label class="flex flex-col gap-1">
+        <span style="color: var(--fg2); font-size: 12px;">.claude dir override</span>
+        <input
+          class="wn-input"
+          type="text"
+          placeholder={"auto (home, or \\\\wsl$\\<distro> on Windows)"}
+          bind:value={draft.claudeDir}
+        />
+      </label>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Transcript watching picks this up on next launch; hook install/remove uses it after Save.
       </p>
       <div class="flex items-center gap-1.5">
         <button

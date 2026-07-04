@@ -36,6 +36,14 @@ pub struct Settings {
     /// path, which uses the token path above.
     #[serde(default)]
     pub neuroskill_data_dir: Option<String>,
+    /// Override the Claude Code config dir — the `.claude` folder holding
+    /// `projects/` (transcripts) and `settings.json` (where hooks install).
+    /// `None` = auto-resolve: the native home (`$HOME`/`%USERPROFILE%`), then on
+    /// Windows a WSL-distro walk (`\\wsl$\<distro>\...\.claude`) for setups where
+    /// Claude Code runs inside WSL and Whence on the host. Set this when discovery
+    /// picks the wrong home (several distros/users with `.claude` trees).
+    #[serde(default)]
+    pub claude_dir: Option<String>,
     /// Explicit project-slug overrides keyed by Claude Code transcript **directory
     /// name** (e.g. `"-root-Projects-glue-mac" -> "glue-mac"`). Wins over the
     /// cwd- and dir-name-derived slug — the escape hatch for names the heuristics
@@ -144,6 +152,7 @@ impl Default for Settings {
             neuroskill_endpoint: None,
             neuroskill_token_path: None,
             neuroskill_data_dir: None,
+            claude_dir: None,
             project_aliases: HashMap::new(),
             hook_listen_addr_override: None,
             ollama_enabled: false,

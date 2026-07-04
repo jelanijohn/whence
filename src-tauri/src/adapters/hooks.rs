@@ -55,9 +55,12 @@ pub struct HookPayload {
 /// `now_rfc3339` is the event timestamp, passed in so this stays pure (no clock
 /// read) and unit-testable. `aliases` is the same transcript-dir-name → slug map
 /// the transcript watcher uses, so hook-derived attribution matches it.
+/// `transcripts_root` is *our* view of the transcript tree, for rebasing a
+/// payload path minted on a different filesystem (see [`local_transcript_path`]).
 pub fn hook_to_event(
     p: &HookPayload,
     aliases: &HashMap<String, String>,
+    transcripts_root: Option<&std::path::Path>,
     now_rfc3339: &str,
 ) -> Option<WorkEvent> {
     let kind = match p.hook_event_name.as_str() {
@@ -85,7 +88,7 @@ pub fn hook_to_event(
     // must say *which* session is awaiting you — its status lands on that project's
     // row. The payload carries `transcript_path` on these events, so resolution works
     // the same as for focus evidence.
-    let project = resolve_slug(p, aliases);
+    let project = resolve_slug(p, aliases, transcripts_root);
 
     Some(WorkEvent {
         ts: now_rfc3339.to_string(),
@@ -115,7 +118,11 @@ pub fn hook_to_event(
 ///   3. **Dir-name heuristic** — the lossy `slug_from_transcript_dir` fallback.
 ///   4. **Live `cwd` basename** — last resort, only when there's no transcript to
 ///      read (so a drifted-but-real cwd still beats nothing).
-fn resolve_slug(p: &HookPayload, aliases: &HashMap<String, String>) -> Option<String> {
+fn resolve_slug(
+    p: &HookPayload,
+    aliases: &HashMap<String, String>,
+    transcripts_root: Option<&std::path::Path>,
+) -> Option<String> {
     if let Some(transcript_path) = p.transcript_path.as_deref() {
         let dir_name = transcript_dir_name(transcript_path);
         if let Some(dir) = dir_name {
@@ -123,7 +130,9 @@ fn resolve_slug(p: &HookPayload, aliases: &HashMap<String, String>) -> Option<St
                 return Some(slug.clone());
             }
         }
-        if let Some(slug) = claude_code::slug_from_cwd(std::path::Path::new(transcript_path)) {
+        if let Some(slug) =
+            claude_code::slug_from_cwd(&local_transcript_path(transcript_path, transcripts_root))
+        {
             return Some(slug);
         }
         if let Some(slug) = dir_name.and_then(slug_from_transcript_dir) {
@@ -131,6 +140,30 @@ fn resolve_slug(p: &HookPayload, aliases: &HashMap<String, String>) -> Option<St
         }
     }
     p.cwd.as_deref().and_then(basename)
+}
+
+/// The transcript path *we* can read. The payload's `transcript_path` is the path
+/// as Claude Code sees it — when Claude Code runs inside WSL and Whence natively
+/// on the Windows host, that's a Linux path that doesn't exist here. If it isn't
+/// readable directly, rebase its `<dir>/<file>` tail onto our own transcripts
+/// root (the same `\\wsl$\...` tree the watcher reads), so the cwd-based slug
+/// resolution keeps working across the filesystem boundary.
+fn local_transcript_path(
+    transcript_path: &str,
+    transcripts_root: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let p = std::path::Path::new(transcript_path);
+    if p.is_file() {
+        return p.to_path_buf();
+    }
+    if let (Some(root), Some(dir), Some(file)) = (
+        transcripts_root,
+        transcript_dir_name(transcript_path),
+        std::path::Path::new(transcript_path).file_name(),
+    ) {
+        return root.join(dir).join(file);
+    }
+    p.to_path_buf()
 }
 
 /// The transcript file stem — the Claude Code session UUID, the per-session source
@@ -172,6 +205,7 @@ pub fn serve(
     tx: UnboundedSender<WorkEvent>,
     aliases: HashMap<String, String>,
     addr: &str,
+    transcripts_root: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind hook receiver on {addr}: {e}"))?;
@@ -185,7 +219,9 @@ pub fn serve(
                 if req.as_reader().read_to_string(&mut body).is_ok() {
                     if let Ok(payload) = serde_json::from_str::<HookPayload>(&body) {
                         let now = chrono::Utc::now().to_rfc3339();
-                        if let Some(ev) = hook_to_event(&payload, &aliases, &now) {
+                        if let Some(ev) =
+                            hook_to_event(&payload, &aliases, transcripts_root.as_deref(), &now)
+                        {
                             // Unbounded send never blocks; an error only means the
                             // core task is gone (shutdown), so dropping is correct.
                             let _ = tx.send(ev);
@@ -223,7 +259,7 @@ mod tests {
 
     #[test]
     fn stop_is_awaiting_input_and_carries_its_project() {
-        let ev = hook_to_event(&payload("Stop"), &no_aliases(), NOW).unwrap();
+        let ev = hook_to_event(&payload("Stop"), &no_aliases(), None, NOW).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
         assert_eq!(ev.surface, Surface::ClaudeCode);
         // Status-only, but still attributed so its row knows which session is awaiting.
@@ -239,7 +275,7 @@ mod tests {
     fn prompt_is_focus_evidence_resolves_project() {
         // payload()'s transcript_path doesn't exist, so resolution falls through to
         // the dir-name heuristic — still "whence".
-        let ev = hook_to_event(&payload("UserPromptSubmit"), &no_aliases(), NOW).unwrap();
+        let ev = hook_to_event(&payload("UserPromptSubmit"), &no_aliases(), None, NOW).unwrap();
         assert_eq!(ev.kind, WorkKind::Prompt);
         assert!(ev.kind.is_focus_evidence());
         assert_eq!(ev.project.as_deref(), Some("whence"));
@@ -265,11 +301,40 @@ mod tests {
             transcript_path: Some(path.to_string_lossy().into_owned()),
             notification_type: None,
         };
-        let ev = hook_to_event(&p, &no_aliases(), NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
         // Launch dir "blapp-web" beats the drifted cwd ("api") and lossy dir-name ("web").
         assert_eq!(ev.project.as_deref(), Some("blapp-web"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn foreign_transcript_path_rebases_onto_local_root() {
+        use std::io::Write;
+        // Cross-filesystem case: the payload carries the path as Claude Code (in
+        // WSL) sees it, but the transcript is actually readable under *our* root
+        // (the `\\wsl$\...` tree on a Windows host). The cwd read must follow the
+        // rebased path, not give up and fall back to the lossy dir name.
+        let root = std::env::temp_dir().join("whence-hooks-rebase-root");
+        let dir = root.join("-root-Projects-blapp-web");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut f = std::fs::File::create(dir.join("rebase-session.jsonl")).unwrap();
+        writeln!(f, "{{\"type\":\"user\",\"cwd\":\"/root/Projects/blapp-web\"}}").unwrap();
+
+        let p = HookPayload {
+            hook_event_name: "UserPromptSubmit".into(),
+            cwd: None,
+            // A path from the other filesystem — does not exist here.
+            transcript_path: Some(
+                "/root/.claude/projects/-root-Projects-blapp-web/rebase-session.jsonl".into(),
+            ),
+            notification_type: None,
+        };
+        let ev = hook_to_event(&p, &no_aliases(), Some(&root), NOW).unwrap();
+        // Rebased cwd read gives "blapp-web"; the dir-name fallback would say "web".
+        assert_eq!(ev.project.as_deref(), Some("blapp-web"));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -278,7 +343,7 @@ mod tests {
         let mut p = payload("UserPromptSubmit");
         p.transcript_path = None;
         p.cwd = Some("/root/Projects/glue".into());
-        let ev = hook_to_event(&p, &no_aliases(), NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
         assert_eq!(ev.project.as_deref(), Some("glue"));
     }
 
@@ -286,7 +351,7 @@ mod tests {
     fn prompt_alias_overrides_cwd() {
         let mut aliases = HashMap::new();
         aliases.insert("-root-Projects-whence".to_string(), "whence-canonical".to_string());
-        let ev = hook_to_event(&payload("UserPromptSubmit"), &aliases, NOW).unwrap();
+        let ev = hook_to_event(&payload("UserPromptSubmit"), &aliases, None, NOW).unwrap();
         assert_eq!(ev.project.as_deref(), Some("whence-canonical"));
     }
 
@@ -295,7 +360,7 @@ mod tests {
         // Hyphenated dir name resolves lossily, but it's all we have without cwd.
         let mut p = payload("UserPromptSubmit");
         p.cwd = None;
-        let ev = hook_to_event(&p, &no_aliases(), NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
         assert_eq!(ev.project.as_deref(), Some("whence"));
     }
 
@@ -304,40 +369,40 @@ mod tests {
         let mut idle = payload("Notification");
         idle.notification_type = Some("idle_prompt".into());
         assert_eq!(
-            hook_to_event(&idle, &no_aliases(), NOW).unwrap().kind,
+            hook_to_event(&idle, &no_aliases(), None, NOW).unwrap().kind,
             WorkKind::AwaitingInput
         );
 
         let mut perm = payload("Notification");
         perm.notification_type = Some("permission_prompt".into());
         assert_eq!(
-            hook_to_event(&perm, &no_aliases(), NOW).unwrap().kind,
+            hook_to_event(&perm, &no_aliases(), None, NOW).unwrap().kind,
             WorkKind::AwaitingInput
         );
 
         // A non-input notification (e.g. auth_success) is not a status signal.
         let mut other = payload("Notification");
         other.notification_type = Some("auth_success".into());
-        assert!(hook_to_event(&other, &no_aliases(), NOW).is_none());
+        assert!(hook_to_event(&other, &no_aliases(), None, NOW).is_none());
     }
 
     #[test]
     fn session_lifecycle_maps_through() {
         assert_eq!(
-            hook_to_event(&payload("SessionStart"), &no_aliases(), NOW).unwrap().kind,
+            hook_to_event(&payload("SessionStart"), &no_aliases(), None, NOW).unwrap().kind,
             WorkKind::SessionStart
         );
         assert_eq!(
-            hook_to_event(&payload("SessionEnd"), &no_aliases(), NOW).unwrap().kind,
+            hook_to_event(&payload("SessionEnd"), &no_aliases(), None, NOW).unwrap().kind,
             WorkKind::SessionEnd
         );
     }
 
     #[test]
     fn tool_and_unknown_events_are_ignored() {
-        assert!(hook_to_event(&payload("PreToolUse"), &no_aliases(), NOW).is_none());
-        assert!(hook_to_event(&payload("PostToolUse"), &no_aliases(), NOW).is_none());
-        assert!(hook_to_event(&payload("SomethingNew"), &no_aliases(), NOW).is_none());
+        assert!(hook_to_event(&payload("PreToolUse"), &no_aliases(), None, NOW).is_none());
+        assert!(hook_to_event(&payload("PostToolUse"), &no_aliases(), None, NOW).is_none());
+        assert!(hook_to_event(&payload("SomethingNew"), &no_aliases(), None, NOW).is_none());
     }
 
     #[test]
@@ -345,7 +410,7 @@ mod tests {
         // Only hook_event_name is required; extra fields are ignored.
         let json = r#"{"hook_event_name":"Stop","session_id":"x","future_field":42}"#;
         let p: HookPayload = serde_json::from_str(json).unwrap();
-        let ev = hook_to_event(&p, &no_aliases(), NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
     }
 }

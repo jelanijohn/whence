@@ -211,7 +211,7 @@ const HOOK_TIMEOUT_SECS: u32 = 5;
 #[tauri::command]
 pub fn install_claude_hooks(state: State<AppState>) -> Result<(), String> {
     let url = hook_url(&state);
-    let path = claude_settings_path()?;
+    let path = claude_settings_path(&state)?;
     let existing = read_json_object(&path)?;
     let merged = merge_hook_config(existing, &url);
     write_json_pretty(&path, &merged)
@@ -222,7 +222,7 @@ pub fn install_claude_hooks(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn uninstall_claude_hooks(state: State<AppState>) -> Result<(), String> {
     let url = hook_url(&state);
-    let path = claude_settings_path()?;
+    let path = claude_settings_path(&state)?;
     let existing = read_json_object(&path)?;
     let pruned = remove_hook_config(existing, &url);
     write_json_pretty(&path, &pruned)
@@ -239,13 +239,22 @@ fn hook_url(state: &State<AppState>) -> String {
     format!("http://{addr}/hook")
 }
 
-/// `~/.claude/settings.json` — the user-scope config, so the hooks fire for *every*
-/// Claude Code session regardless of project. Claude Code runs on the Linux side
-/// under WSL2 (same place the transcript watcher reads `~/.claude/projects`), so
-/// `$HOME` is the right root.
-fn claude_settings_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("could not resolve $HOME")?;
-    Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+/// `<claude_dir>/settings.json` — the user-scope config, so the hooks fire for
+/// *every* Claude Code session regardless of project. Resolved through the same
+/// `claude_dir` discovery the transcript watcher uses (override → native home →
+/// WSL distro walk on Windows), so hooks always install into the *same* Claude
+/// Code the transcripts come from — including WSL's `~/.claude/settings.json`,
+/// written through `\\wsl$\`, when Whence runs natively on the Windows host.
+fn claude_settings_path(state: &State<AppState>) -> Result<PathBuf, String> {
+    let override_dir = state
+        .settings
+        .lock()
+        .ok()
+        .and_then(|g| g.claude_dir.clone());
+    let dir = crate::adapters::claude_code::claude_dir(override_dir.as_deref()).ok_or(
+        "could not resolve the Claude Code config dir — set the Claude dir override in Settings",
+    )?;
+    Ok(dir.join("settings.json"))
 }
 
 /// Read a JSON object from `path`, defaulting to an empty object when the file is
