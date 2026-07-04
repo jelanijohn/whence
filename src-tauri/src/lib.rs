@@ -165,15 +165,21 @@ pub fn run() {
                     }
                 }
 
+                // The transcript watcher is best-effort like every other adapter: a
+                // failed start must NOT kill the engine. Returning here would drop
+                // `rx` and silently void every event from the receivers above (the
+                // v0.1.0 Windows bug: no $HOME → early return → browser/hook events
+                // sent into a closed channel). Hold a successful watcher's handle in
+                // an Option so it stays alive for the task's lifetime.
                 let _watcher = match adapters::claude_code::watch(
                     tx,
                     aliases,
                     loaded.claude_dir.as_deref(),
                 ) {
-                    Ok(w) => w,
+                    Ok(w) => Some(w),
                     Err(e) => {
                         eprintln!("whence: transcript watcher failed to start: {e}");
-                        return;
+                        None
                     }
                 };
                 orchestrator::run(handle, rx, shared, data_dir, loaded).await;
