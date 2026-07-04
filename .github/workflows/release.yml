@@ -1,0 +1,85 @@
+# Builds Whence installers for Windows, macOS (Apple Silicon + Intel), and
+# Linux whenever a version tag (v*) is pushed, and attaches them to a draft
+# GitHub release. Publish the draft manually once you've sanity-checked the
+# artifacts.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+          - platform: macos-latest
+            args: '--target x86_64-apple-darwin'
+          - platform: ubuntu-22.04
+            args: ''
+          - platform: windows-latest
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # webkit2gtk 4.1 is the Tauri v2 baseline; ayatana-appindicator backs the
+      # tray icon on Linux.
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file libxdo-dev \
+            libssl-dev libgtk-3-dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Intel macOS is cross-compiled from the Apple Silicon runner.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.args }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The tag is the source of truth for the release version: v0.2.0 →
+      # 0.2.0 stamped into tauri.conf.json before bundling, so the in-repo
+      # version never needs a manual bump to cut a release.
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tauri.conf.tmp
+          mv tauri.conf.tmp src-tauri/tauri.conf.json
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Whence v__VERSION__'
+          releaseBody: 'See the assets below to download and install this version.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
