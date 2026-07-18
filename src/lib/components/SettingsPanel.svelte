@@ -6,8 +6,10 @@
     installClaudeHooks,
     uninstallClaudeHooks,
     getBrowserMappingPath,
+    getReceiverAuth,
+    rotateReceiverToken,
   } from "$lib/tauri";
-  import type { Settings } from "$lib/types";
+  import type { Settings, ReceiverAuth } from "$lib/types";
   import { neuroskill } from "$lib/stores/neuroskill.svelte";
   import { appearance, clampOpacity, MIN_OPACITY } from "$lib/stores/appearance.svelte";
   import Toggle from "./Toggle.svelte";
@@ -178,6 +180,39 @@
   // browser adapter is on. Best-effort: a failure just hides the path hint.
   let browserMappingPath = $state<string | null>(null);
 
+  // Receiver auth: the bearer token gating the three loopback receivers, plus the
+  // rejected-request counter. Polled while the panel is open so the diagnostic
+  // stays live (denials tick up as they happen, not on reopen).
+  let receiverAuth = $state<ReceiverAuth | null>(null);
+  let authBusy = $state(false);
+  let authMsg = $state<string | null>(null);
+  let authErr = $state<string | null>(null);
+  let authPoll: ReturnType<typeof setInterval> | undefined;
+
+  async function refreshReceiverAuth() {
+    try {
+      receiverAuth = await getReceiverAuth();
+    } catch {
+      receiverAuth = null; // section hides; not worth an error banner
+    }
+  }
+
+  async function rotateToken() {
+    if (authBusy) return;
+    authBusy = true;
+    authMsg = null;
+    authErr = null;
+    try {
+      receiverAuth = await rotateReceiverToken();
+      authMsg = "Token rotated — update your shell hook / extension";
+      setTimeout(() => (authMsg = null), 4000);
+    } catch (e) {
+      authErr = String(e);
+    } finally {
+      authBusy = false;
+    }
+  }
+
   onMount(async () => {
     try {
       const s = await getSettings();
@@ -193,6 +228,11 @@
     } catch {
       browserMappingPath = null;
     }
+    await refreshReceiverAuth();
+    authPoll = setInterval(refreshReceiverAuth, 5000);
+  });
+  onDestroy(() => {
+    if (authPoll) clearInterval(authPoll);
   });
 
   function addAlias() {
@@ -428,6 +468,47 @@
       {/if}
     </div>
 
+    <!-- Receiver auth — the bearer token gating the three loopback receivers
+         (Claude hooks · terminal · browser). Diagnostic tone: the denial counter
+         reports, it never scolds. -->
+    {#if receiverAuth}
+      <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+        <p class="label" style="margin-top: 8px;">Receiver auth</p>
+        <p style="color: var(--fg3); font-size: 11px;">
+          Local receivers only accept requests carrying this token. Hook install embeds it
+          automatically; the terminal snippet and browser extension carry it as a header.
+        </p>
+        <div class="flex items-center gap-1.5">
+          <input
+            class="wn-input tabular-nums"
+            style="flex: 1; min-width: 0; font-size: 10px;"
+            type="text"
+            readonly
+            value={receiverAuth.token}
+            onfocus={(e) => (e.currentTarget as HTMLInputElement).select()}
+          />
+          <button
+            type="button"
+            style="color: var(--fg2); font-size: 12px; padding: 5px 12px; border-radius: 7px; border: 1px solid var(--border-soft); cursor: pointer; white-space: nowrap;"
+            class:opacity-50={authBusy}
+            disabled={authBusy}
+            onclick={rotateToken}
+          >
+            Rotate
+          </button>
+        </div>
+        <p style="color: var(--fg3); font-size: 11px;">
+          Rejected requests since launch:
+          <span class="tabular-nums" style="color: var(--fg2);">{receiverAuth.denials}</span>
+        </p>
+        {#if authErr}
+          <span style="color: #d9544f; font-size: 11px;" title={authErr} class="truncate">{authErr}</span>
+        {:else if authMsg}
+          <span style="color: var(--accent); font-size: 11px;">{authMsg}</span>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Terminal cwd -->
     <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
       <p class="label" style="margin-top: 8px;">Terminal</p>
@@ -441,9 +522,9 @@
       {#if draft.terminalEnabled}
         <p style="color: var(--fg3); font-size: 11px;">
           Add a shell hook POSTing <span class="tabular-nums">$PWD</span> to
-          <span class="tabular-nums">127.0.0.1:18451/cwd</span>. zsh:
+          <span class="tabular-nums">127.0.0.1:18451/cwd</span> with the receiver token. zsh:
           <code style="color: var(--fg2); font-size: 10px; word-break: break-all;"
-            >{`chpwd(){ curl -sm1 -d "{\\"cwd\\":\\"$PWD\\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`}</code
+            >{`chpwd(){ curl -sm1 -H "Authorization: Bearer ${receiverAuth?.token ?? "<token>"}" -d "{\\"cwd\\":\\"$PWD\\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`}</code
           >
         </p>
       {/if}
@@ -463,7 +544,8 @@
       {#if draft.browserEnabled}
         <p style="color: var(--fg3); font-size: 11px;">
           Install the extension from <span class="tabular-nums">extension/</span> (load unpacked); it
-          POSTs to <span class="tabular-nums">127.0.0.1:18452/browser</span>.
+          POSTs to <span class="tabular-nums">127.0.0.1:18452/browser</span>. Paste the receiver
+          token (above) into the extension's options page once.
         </p>
         {#if browserMappingPath}
           <p style="color: var(--fg3); font-size: 11px;">

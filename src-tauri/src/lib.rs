@@ -5,6 +5,7 @@
 //! `engine::segment` (pure, fixture-tested); orchestration lives in `core`.
 
 mod adapters;
+mod auth;
 mod commands;
 mod engine;
 mod orchestrator;
@@ -76,6 +77,15 @@ pub fn run() {
             let raise_queue: adapters::browser::RaiseQueue =
                 Arc::new(Mutex::new(std::collections::VecDeque::new()));
 
+            // The per-install receiver bearer token (minted on first launch, 0600)
+            // and the denial counter — shared with the three listener threads and
+            // the Settings commands, so a rotation applies live and denials are
+            // visible as a diagnostic.
+            let receiver_token: auth::SharedToken =
+                Arc::new(std::sync::RwLock::new(auth::load_or_mint(&data_dir)));
+            let auth_denials: auth::Denials =
+                Arc::new(std::sync::atomic::AtomicU64::new(0));
+
             app.manage(AppState {
                 snapshot: shared.clone(),
                 data_dir: data_dir.clone(),
@@ -83,6 +93,8 @@ pub fn run() {
                 neuroskill: neuroskill_status.clone(),
                 tx: tx.clone(),
                 raise_queue: raise_queue.clone(),
+                receiver_token: receiver_token.clone(),
+                auth_denials: auth_denials.clone(),
             });
 
             // NeuroSkill connection health: an independent probe loop that keeps the
@@ -119,6 +131,8 @@ pub fn run() {
                     aliases.clone(),
                     &hook_addr,
                     transcripts_root,
+                    receiver_token.clone(),
+                    auth_denials.clone(),
                 ) {
                     eprintln!("whence: hook receiver not started: {e}");
                 }
@@ -136,9 +150,13 @@ pub fn run() {
                 // corroboration; everything else still runs (degrade, don't crash).
                 if loaded.terminal_enabled {
                     let terminal_addr = loaded.terminal_listen_addr();
-                    if let Err(e) =
-                        adapters::terminal::serve(tx.clone(), aliases.clone(), &terminal_addr)
-                    {
+                    if let Err(e) = adapters::terminal::serve(
+                        tx.clone(),
+                        aliases.clone(),
+                        &terminal_addr,
+                        receiver_token.clone(),
+                        auth_denials.clone(),
+                    ) {
                         eprintln!("whence: terminal cwd receiver not started: {e}");
                     }
                 }
@@ -157,6 +175,8 @@ pub fn run() {
                                 store,
                                 &browser_addr,
                                 raise_queue.clone(),
+                                receiver_token.clone(),
+                                auth_denials.clone(),
                             ) {
                                 eprintln!("whence: browser receiver not started: {e}");
                             }
@@ -198,6 +218,8 @@ pub fn run() {
             commands::set_settings,
             commands::install_claude_hooks,
             commands::uninstall_claude_hooks,
+            commands::get_receiver_auth,
+            commands::rotate_receiver_token,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Whence");

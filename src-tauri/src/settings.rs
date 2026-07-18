@@ -53,8 +53,8 @@ pub struct Settings {
     pub project_aliases: HashMap<String, String>,
     /// Override the loopback address the Claude Code hook receiver binds (and the
     /// URL written into the hook config). `None` = the built-in default
-    /// (`127.0.0.1:18450`). Loopback-only by design — the receiver is unauthenticated
-    /// (spec principle #4); bind it somewhere only local processes can reach.
+    /// (`127.0.0.1:18450`). Loopback-only by design, and bearer-gated (`auth.rs`) —
+    /// the token rides in the installed hook URL.
     #[serde(default)]
     pub hook_listen_addr_override: Option<String>,
     /// Poll Ollama's local API for inference **liveness** (a low-confidence status
@@ -79,8 +79,8 @@ pub struct Settings {
     #[serde(default)]
     pub terminal_enabled: bool,
     /// Override the loopback address the terminal cwd receiver binds. `None` = the
-    /// built-in default (`127.0.0.1:18451`). Loopback-only by design — the receiver
-    /// is unauthenticated (principle #4).
+    /// built-in default (`127.0.0.1:18451`). Loopback-only by design, and
+    /// bearer-gated (`auth.rs`) — the shell snippet carries the token as a header.
     #[serde(default)]
     pub terminal_listen_addr_override: Option<String>,
     /// Receive browser LLM sessions from the first-party Whence extension — an
@@ -91,8 +91,9 @@ pub struct Settings {
     #[serde(default)]
     pub browser_enabled: bool,
     /// Override the loopback address the browser receiver binds. `None` = the built-in
-    /// default (`127.0.0.1:18452`). Loopback-only by design — the receiver is
-    /// unauthenticated (principle #4); the extension POSTs to it from the page.
+    /// default (`127.0.0.1:18452`). Loopback-only by design, and bearer-gated
+    /// (`auth.rs`) — the extension sends the token (from its options page) as a
+    /// header on its POSTs and on `GET /raise`.
     #[serde(default)]
     pub browser_listen_addr_override: Option<String>,
     /// Sustained seconds before a focus switch is confirmed.

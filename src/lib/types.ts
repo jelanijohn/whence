@@ -87,6 +87,16 @@ export interface FocusSnapshot {
   projects: ProjectSnapshot[];
 }
 
+// Receiver auth state — mirrors `ReceiverAuth` in src-tauri/src/commands.rs.
+// The bearer token gating the three loopback receivers (hooks/terminal/browser),
+// where it's stored, and how many unauthenticated requests were rejected since
+// launch (a diagnostic counter, not a log).
+export interface ReceiverAuth {
+  token: string;
+  tokenPath: string;
+  denials: number;
+}
+
 export interface Settings {
   autostart: boolean; // opt-in, default false (never silently)
   neuroskillEnabled: boolean; // write attribution labels into NeuroSkill

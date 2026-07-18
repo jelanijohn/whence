@@ -34,6 +34,16 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
   (`/api/ps` liveness) and `terminal.rs` (cwd corroborator on `127.0.0.1:18451`)
   are opt-in, default OFF (`ollama_enabled` / `terminal_enabled`), and only
   spawned when enabled. Adding a surface = adding an adapter; nothing else changes.
+* **`src-tauri/src/auth.rs`** — receiver auth. All three loopback receivers (hooks
+  `18450`, terminal `18451`, browser `18452` incl. `GET /raise`) are **bearer-gated**
+  by a per-install token: minted at first launch, stored `0600` as
+  `<app_data_dir>/receiver.token`, shown/rotatable in Settings, applied live via a
+  shared handle (`SharedToken`). Carriers: the installed hook URL embeds it
+  (`/hook/<token>` — `http` hooks can't set headers); the terminal snippet and the
+  extension (options page → `chrome.storage.local`) send `Authorization: Bearer`.
+  Unauthenticated requests get 401 and bump a visible denial counter (diagnostic,
+  never evaluative). The request check (`request_authorized`) is pure and
+  fixture-tested — keep the sockets the only impure part.
 * **`src-tauri/src/engine/segment.rs`** — the heart. **Pure and fixture-tested**:
   no I/O, no clock reads, every time comes in via the event or an explicit `now`.
   This is the debounce/switch-confirmation/block logic. *Keep it pure* — if you

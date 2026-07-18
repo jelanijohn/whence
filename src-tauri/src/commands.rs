@@ -32,6 +32,11 @@ pub struct AppState {
     pub tx: UnboundedSender<WorkEvent>,
     /// Pending browser-tab raises the extension drains via `GET /raise`.
     pub raise_queue: RaiseQueue,
+    /// The live receiver bearer token — shared with the three listener threads, so a
+    /// rotation here applies to them without a restart.
+    pub receiver_token: crate::auth::SharedToken,
+    /// Denied (401) receiver requests since launch — the Settings diagnostic.
+    pub auth_denials: crate::auth::Denials,
 }
 
 /// Current focus snapshot — every live session (each with its own status + timer).
@@ -208,29 +213,103 @@ const HOOK_TIMEOUT_SECS: u32 = 5;
 /// entries (idempotent, keyed by URL), and writes back without touching any other
 /// keys. The spec's "offers to write the hook config; never silently" (§5.1): this
 /// fires only on explicit user action.
+///
+/// The written URL embeds the receiver bearer token (`/hook/<token>` — `http` hooks
+/// can't set headers), so the existing install/uninstall round-trip carries auth
+/// with zero extra user steps. Stale Whence entries under the same base (an old
+/// token, or the pre-auth bare `/hook`) are pruned first, so re-install after a
+/// rotation converges instead of accumulating dead hooks.
 #[tauri::command]
 pub fn install_claude_hooks(state: State<AppState>) -> Result<(), String> {
     let url = hook_url(&state);
     let path = claude_settings_path(&state)?;
     let existing = read_json_object(&path)?;
-    let merged = merge_hook_config(existing, &url);
+    let pruned = remove_hook_config(existing, &hook_base_url(&state));
+    let merged = merge_hook_config(pruned, &url);
     write_json_pretty(&path, &merged)
 }
 
 /// Remove Whence's `http` hook entries from `~/.claude/settings.json`, leaving all
-/// other config intact. Round-trips `install` exactly.
+/// other config intact. Round-trips `install` exactly. Matches by the base URL, so
+/// entries carrying any token generation (or none) are all removed.
 #[tauri::command]
 pub fn uninstall_claude_hooks(state: State<AppState>) -> Result<(), String> {
-    let url = hook_url(&state);
+    let base = hook_base_url(&state);
     let path = claude_settings_path(&state)?;
     let existing = read_json_object(&path)?;
-    let pruned = remove_hook_config(existing, &url);
+    let pruned = remove_hook_config(existing, &base);
     write_json_pretty(&path, &pruned)
 }
 
-/// The receiver URL written into the hook config — `http://<bind>/hook`, where the
-/// bind is the (possibly overridden) loopback address the listener is using.
+/// Receiver auth surfaced to Settings: the live token, where it's stored, and how
+/// many unauthenticated requests the receivers have rejected since launch.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiverAuth {
+    pub token: String,
+    pub token_path: String,
+    pub denials: u64,
+}
+
+/// Current receiver-auth state — drives the Settings section (token display, the
+/// terminal snippet, and the denial counter).
+#[tauri::command]
+pub fn get_receiver_auth(state: State<AppState>) -> ReceiverAuth {
+    ReceiverAuth {
+        token: state.receiver_token.read().map(|t| t.clone()).unwrap_or_default(),
+        token_path: crate::auth::token_path(&state.data_dir).to_string_lossy().into_owned(),
+        denials: state.auth_denials.load(std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
+/// Rotate the receiver token: mint + persist a new one and apply it to the live
+/// listeners immediately. If Claude Code hooks are installed, their URLs are
+/// rewritten to carry the new token in the same pass (best-effort — a failure
+/// there is reported but doesn't undo the rotation; re-running "Install hooks"
+/// recovers). The terminal snippet and extension need the new token pasted —
+/// that's the point of a rotation.
+#[tauri::command]
+pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, String> {
+    let token = crate::auth::rotate(&state.data_dir)
+        .map_err(|e| format!("could not persist the new token: {e}"))?;
+    if let Ok(mut guard) = state.receiver_token.write() {
+        *guard = token;
+    }
+
+    // Refresh installed hooks to the new URL. Only rewrite when our hooks are
+    // actually present — rotation must not install hooks the user never opted into.
+    let refresh = (|| -> Result<(), String> {
+        let base = hook_base_url(&state);
+        let path = claude_settings_path(&state)?;
+        let existing = read_json_object(&path)?;
+        if !config_has_whence_hooks(&existing, &base) {
+            return Ok(());
+        }
+        let merged = merge_hook_config(remove_hook_config(existing, &base), &hook_url(&state));
+        write_json_pretty(&path, &merged)
+    })();
+    if let Err(e) = refresh {
+        return Err(format!(
+            "token rotated, but the installed Claude hooks could not be updated ({e}) — \
+             re-run Install hooks"
+        ));
+    }
+
+    Ok(get_receiver_auth(state))
+}
+
+/// The receiver URL written into the hook config — `http://<bind>/hook/<token>`,
+/// where the bind is the (possibly overridden) loopback address the listener is
+/// using and the token is the live receiver bearer token (the `http` hook's only
+/// way to carry a credential).
 fn hook_url(state: &State<AppState>) -> String {
+    let token = state.receiver_token.read().map(|t| t.clone()).unwrap_or_default();
+    format!("{}/{token}", hook_base_url(state))
+}
+
+/// The token-less hook URL prefix — the identity by which *any* generation of
+/// Whence hook entry is recognized for pruning/uninstall.
+fn hook_base_url(state: &State<AppState>) -> String {
     let addr = state
         .settings
         .lock()
@@ -323,10 +402,11 @@ fn merge_hook_config(mut root: serde_json::Value, url: &str) -> serde_json::Valu
     root
 }
 
-/// Remove every Whence `http` hook (matched by `url`) from a settings object,
-/// pruning now-empty matcher groups and empty event arrays so an uninstall
-/// round-trips back to the pre-install shape. Pure — unit-tested.
-fn remove_hook_config(mut root: serde_json::Value, url: &str) -> serde_json::Value {
+/// Remove every Whence `http` hook (any entry under `base` — with or without an
+/// embedded token) from a settings object, pruning now-empty matcher groups and
+/// empty event arrays so an uninstall round-trips back to the pre-install shape.
+/// Pure — unit-tested.
+fn remove_hook_config(mut root: serde_json::Value, base: &str) -> serde_json::Value {
     let Some(obj) = root.as_object_mut() else { return root };
     let Some(hooks_obj) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return root;
@@ -338,7 +418,7 @@ fn remove_hook_config(mut root: serde_json::Value, url: &str) -> serde_json::Val
         };
         for group in groups.iter_mut() {
             if let Some(list) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                list.retain(|h| !is_whence_hook(h, url));
+                list.retain(|h| !is_whence_hook_under(h, base));
             }
         }
         // Drop matcher groups left with no hooks, then the event key if now empty.
@@ -367,10 +447,47 @@ fn hook_present(arr: &[serde_json::Value], url: &str) -> bool {
     })
 }
 
-/// A hook entry is ours iff it's an `http` hook pointed at our `url`.
+/// A hook entry is ours iff it's an `http` hook pointed at exactly our `url`
+/// (base + current token) — the idempotence key for merge.
 fn is_whence_hook(h: &serde_json::Value, url: &str) -> bool {
     h.get("type").and_then(|t| t.as_str()) == Some("http")
         && h.get("url").and_then(|u| u.as_str()) == Some(url)
+}
+
+/// A hook entry is *some generation of* ours iff it's an `http` hook whose URL is
+/// `base` itself (the pre-auth shape) or a `base/<anything>` (any token) —
+/// segment-bounded, so an unrelated `.../hooked` never matches. The removal key.
+fn is_whence_hook_under(h: &serde_json::Value, base: &str) -> bool {
+    if h.get("type").and_then(|t| t.as_str()) != Some("http") {
+        return false;
+    }
+    match h.get("url").and_then(|u| u.as_str()) {
+        Some(u) => u == base || u.strip_prefix(base).is_some_and(|rest| rest.starts_with('/')),
+        None => false,
+    }
+}
+
+/// Whether a settings object carries any Whence hook entry under `base` — the
+/// "were hooks installed?" probe the rotation refresh keys on.
+fn config_has_whence_hooks(root: &serde_json::Value, base: &str) -> bool {
+    let Some(hooks_obj) = root.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    HOOK_EVENTS.iter().any(|event| {
+        hooks_obj
+            .get(*event)
+            .and_then(|g| g.as_array())
+            .map(|groups| {
+                groups.iter().any(|group| {
+                    group
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|list| list.iter().any(|h| is_whence_hook_under(h, base)))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Coerce a `Value` to an object map, replacing a non-object with an empty one.
@@ -473,5 +590,57 @@ mod tests {
         let merged = merge_hook_config(serde_json::json!([1, 2, 3]), URL);
         assert!(merged.is_object());
         assert!(hook_present(merged["hooks"]["Stop"].as_array().unwrap(), URL));
+    }
+
+    const BASE: &str = "http://127.0.0.1:18450/hook";
+
+    #[test]
+    fn install_after_rotation_converges_to_one_hook() {
+        // The install path: prune everything under the base, then merge the current
+        // tokened URL — an old-token entry (or the pre-auth bare /hook) never
+        // accumulates alongside the new one.
+        let old_url = format!("{BASE}/oldtok");
+        let new_url = format!("{BASE}/newtok");
+        let with_old = merge_hook_config(serde_json::json!({}), &old_url);
+        let converged = merge_hook_config(remove_hook_config(with_old, BASE), &new_url);
+        for event in HOOK_EVENTS {
+            let arr = converged["hooks"][event].as_array().unwrap();
+            assert!(hook_present(arr, &new_url), "{event} missing new-token hook");
+            assert!(!hook_present(arr, &old_url), "{event} kept stale-token hook");
+        }
+    }
+
+    #[test]
+    fn uninstall_removes_any_token_generation() {
+        // Uninstall keys on the base, so a tokened install and a legacy bare-/hook
+        // install are both fully removed.
+        let tokened = merge_hook_config(serde_json::json!({}), &format!("{BASE}/tok123"));
+        assert_eq!(remove_hook_config(tokened, BASE), serde_json::json!({}));
+        let legacy = merge_hook_config(serde_json::json!({}), BASE);
+        assert_eq!(remove_hook_config(legacy, BASE), serde_json::json!({}));
+    }
+
+    #[test]
+    fn base_matching_is_segment_bounded() {
+        // A user's own http hook at a URL that merely extends the base string is
+        // NOT ours and must survive an uninstall.
+        let foreign = serde_json::json!({
+            "hooks": {
+                "Stop": [{ "matcher": "", "hooks": [
+                    { "type": "http", "url": "http://127.0.0.1:18450/hooked" }
+                ]}]
+            }
+        });
+        assert_eq!(remove_hook_config(foreign.clone(), BASE), foreign);
+        assert!(!config_has_whence_hooks(&foreign, BASE));
+    }
+
+    #[test]
+    fn installed_probe_detects_any_generation() {
+        assert!(!config_has_whence_hooks(&serde_json::json!({}), BASE));
+        let tokened = merge_hook_config(serde_json::json!({}), &format!("{BASE}/tok"));
+        assert!(config_has_whence_hooks(&tokened, BASE));
+        let legacy = merge_hook_config(serde_json::json!({}), BASE);
+        assert!(config_has_whence_hooks(&legacy, BASE));
     }
 }

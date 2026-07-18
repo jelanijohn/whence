@@ -17,9 +17,11 @@
 //! **Transport.** A loopback receiver, mirroring the Claude hooks receiver
 //! (`hooks.rs`): a one-line shell hook POSTs `{"cwd": "<dir>", "id": "<shell>"}` to
 //! `http://127.0.0.1:18451/cwd` on directory change. Opt-in (`terminal_enabled`,
-//! default off) and unauthenticated by design (loopback only, principle #4). The
-//! shell snippet is the user's to add — Whence never edits shell rc files silently.
-//! E.g. for zsh: `chpwd() { curl -sm1 -d "{\"cwd\":\"$PWD\",\"id\":\"$$\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`.
+//! default off) and **bearer-gated** (`crate::auth`): the snippet carries the
+//! receiver token as an `Authorization` header, so an arbitrary local process can't
+//! steer corroboration. The shell snippet is the user's to add — Whence never edits
+//! shell rc files silently. E.g. for zsh (token from Settings):
+//! `chpwd() { curl -sm1 -H "Authorization: Bearer <token>" -d "{\"cwd\":\"$PWD\",\"id\":\"$$\"}" 127.0.0.1:18451/cwd >/dev/null 2>&1 }`.
 //! The `id` (the shell PID `$$`) is the per-terminal **source** key, so two shells in
 //! the same repo read as two source rows under that project (§9). It's optional — a
 //! snippet that omits it just folds all terminals on a project into one "terminal" row.
@@ -27,7 +29,8 @@
 //! Two layers, mirroring `engine::segment`'s purity ethos:
 //!   * [`cwd_to_event`] — **pure, fixture-tested**: payload → `WorkEvent` (or
 //!     `None` when there's no usable cwd). The clock comes in as a parameter.
-//!   * [`serve`] — the thin impure shell: bind `tiny_http`, read bodies, map, send.
+//!   * [`serve`] — the thin impure shell: bind `tiny_http`, check the token, read
+//!     bodies, map, send.
 
 use std::collections::HashMap;
 
@@ -115,6 +118,8 @@ pub fn serve(
     tx: UnboundedSender<WorkEvent>,
     aliases: HashMap<String, String>,
     addr: &str,
+    token: crate::auth::SharedToken,
+    denials: crate::auth::Denials,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind terminal cwd receiver on {addr}: {e}"))?;
@@ -123,6 +128,12 @@ pub fn serve(
         .name("whence-terminal".into())
         .spawn(move || {
             for mut req in server.incoming_requests() {
+                let tok = token.read().map(|t| t.clone()).unwrap_or_default();
+                if !crate::auth::tiny_http_authorized(&req, &tok) {
+                    crate::auth::record_denial(&denials, "terminal");
+                    let _ = req.respond(tiny_http::Response::empty(401));
+                    continue;
+                }
                 let mut body = String::new();
                 if req.as_reader().read_to_string(&mut body).is_ok() {
                     if let Ok(payload) = serde_json::from_str::<CwdPayload>(&body) {

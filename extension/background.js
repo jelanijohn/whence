@@ -13,6 +13,27 @@ const WHENCE_ENDPOINT = "http://127.0.0.1:18452/browser";
 const WHENCE_RAISE_ENDPOINT = "http://127.0.0.1:18452/raise";
 const WHENCE_DEBUG = false; // flip on to trace relaying in the service-worker console
 
+// --- Receiver auth ------------------------------------------------------------------
+// Whence's loopback receiver is bearer-gated: every request must carry the token the
+// user pasted into this extension's options page (widget Settings → Receiver auth).
+// Kept as a promise so a relay racing the initial storage read still waits for the
+// token instead of firing headerless and eating a 401.
+
+let tokenPromise = chrome.storage.local
+  .get("token")
+  .then(({ token }) => token || "");
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.token) {
+    tokenPromise = Promise.resolve(changes.token.newValue || "");
+  }
+});
+
+async function authHeaders(extra = {}) {
+  const token = await tokenPromise;
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
+}
+
 // Poll cadence for the raise back-channel. A click is only useful for a moment, so
 // ~1.5s latency is imperceptible while staying gentle on the loopback.
 const POLL_MS = 1500;
@@ -34,12 +55,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // fetch settles — this keeps the MV3 service worker alive long enough to finish the
   // POST. Without it the worker can be terminated the instant this listener returns,
   // cutting the request (the bug that made relaying intermittent).
-  fetch(WHENCE_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(msg.payload),
-    keepalive: true,
-  })
+  authHeaders({ "Content-Type": "application/json" })
+    .then((headers) =>
+      fetch(WHENCE_ENDPOINT, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(msg.payload),
+        keepalive: true,
+      }),
+    )
     .then((r) => {
       if (WHENCE_DEBUG) console.log("[whence:bg] relayed", r.status, msg.payload.url);
       sendResponse({ ok: true, status: r.status });
@@ -97,7 +121,7 @@ async function raiseTab(targetUrl) {
 let polling = false;
 async function pollOnce() {
   try {
-    const r = await fetch(WHENCE_RAISE_ENDPOINT);
+    const r = await fetch(WHENCE_RAISE_ENDPOINT, { headers: await authHeaders() });
     if (!r.ok) return;
     const { raise = [] } = await r.json();
     for (const url of raise) await raiseTab(url);

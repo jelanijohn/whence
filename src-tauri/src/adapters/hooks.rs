@@ -15,7 +15,8 @@
 //! Two layers, mirroring `engine::segment`'s purity ethos:
 //!   * [`hook_to_event`] — **pure, fixture-tested**: payload → `WorkEvent` (or
 //!     `None` for events we ignore). The clock comes in as a parameter.
-//!   * [`serve`] — the thin impure shell: bind `tiny_http`, read bodies, map, send.
+//!   * [`serve`] — the thin impure shell: bind `tiny_http`, check the bearer token
+//!     (`crate::auth` — embedded in the installed hook URL), read bodies, map, send.
 //!
 //! Every event resolves a project slug — status-only ones (`Stop`/`Notification`)
 //! included. The widget shows one row per project, so a turn-finished `Stop` must
@@ -198,14 +199,23 @@ fn basename(cwd: &str) -> Option<String> {
 /// process lifetime. The spawned thread owns the `Server`, so the listener lives
 /// as long as the process without a handle to hold.
 ///
-/// Every request gets a `200` with an empty body — Claude Code ignores the
-/// response, and the receiver's only contract is "accept fast, never block".
+/// **Bearer-gated** (`crate::auth`): Claude Code `http` hooks can't set headers,
+/// so `install_claude_hooks` embeds the token in the URL (`/hook/<token>`) and the
+/// check accepts either carrier. Unauthenticated requests get a 401 and count a
+/// denial — a forged `UserPromptSubmit` would otherwise be a confidence-1.0
+/// you-acted `Prompt`, the strongest signal in the trust model. The token is read
+/// per request from the shared handle so a Settings rotation applies live.
+///
+/// Every authorized request gets a `200` with an empty body — Claude Code ignores
+/// the response, and the receiver's only contract is "accept fast, never block".
 /// Malformed or unrecognized payloads are accepted and dropped, not rejected.
 pub fn serve(
     tx: UnboundedSender<WorkEvent>,
     aliases: HashMap<String, String>,
     addr: &str,
     transcripts_root: Option<std::path::PathBuf>,
+    token: crate::auth::SharedToken,
+    denials: crate::auth::Denials,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind hook receiver on {addr}: {e}"))?;
@@ -214,6 +224,12 @@ pub fn serve(
         .name("whence-hooks".into())
         .spawn(move || {
             for mut req in server.incoming_requests() {
+                let tok = token.read().map(|t| t.clone()).unwrap_or_default();
+                if !crate::auth::tiny_http_authorized(&req, &tok) {
+                    crate::auth::record_denial(&denials, "hooks");
+                    let _ = req.respond(tiny_http::Response::empty(401));
+                    continue;
+                }
                 let mut body = String::new();
                 // Read the POST body; on a read error just respond and move on.
                 if req.as_reader().read_to_string(&mut body).is_ok() {
@@ -288,7 +304,11 @@ mod tests {
         // payload cwd that has drifted into a subdir (the live-observed bug: a
         // `cd src-tauri` made the hook attribute the prompt to "src-tauri").
         // Resolution must follow the stable launch dir, like the transcript watcher.
-        let dir = std::env::temp_dir().join("-root-Projects-blapp-web");
+        // The temp dir root is unique to this test — claude_code's tests also stage
+        // a `-root-Projects-blapp-web`, and sharing one path made the suite flaky
+        // (each test deletes the dir under the other mid-run).
+        let root = std::env::temp_dir().join("whence-hooks-drift-root");
+        let dir = root.join("-root-Projects-blapp-web");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("hooks-session.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -305,7 +325,7 @@ mod tests {
         // Launch dir "blapp-web" beats the drifted cwd ("api") and lossy dir-name ("web").
         assert_eq!(ev.project.as_deref(), Some("blapp-web"));
 
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -412,5 +432,66 @@ mod tests {
         let p: HookPayload = serde_json::from_str(json).unwrap();
         let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
+    }
+
+    /// One raw HTTP round-trip (Connection: close, so the read terminates).
+    fn raw_http(addr: &str, request: &str) -> String {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(addr).unwrap();
+        s.write_all(request.as_bytes()).unwrap();
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).unwrap();
+        resp
+    }
+
+    #[test]
+    fn serve_gates_requests_end_to_end() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, RwLock};
+
+        // A real listener on an uncommon test port, gated by a known token.
+        let addr = "127.0.0.1:28450";
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let token: crate::auth::SharedToken = Arc::new(RwLock::new("testtok".to_string()));
+        let denials: crate::auth::Denials = Arc::new(AtomicU64::new(0));
+        serve(tx, no_aliases(), addr, None, token.clone(), denials.clone()).unwrap();
+
+        let body = r#"{"hook_event_name":"Stop","cwd":"/root/Projects/whence"}"#;
+        let post = |path: &str, extra: &str| {
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: whence\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+
+        // No credential → 401, a counted denial, and no event reaches the engine.
+        let resp = raw_http(addr, &post("/hook", ""));
+        assert!(resp.starts_with("HTTP/1.1 401"), "expected 401, got: {resp}");
+        assert_eq!(denials.load(Ordering::Relaxed), 1);
+        assert!(rx.try_recv().is_err(), "unauthenticated event must be dropped");
+
+        // Wrong path token → still 401.
+        let resp = raw_http(addr, &post("/hook/wrong", ""));
+        assert!(resp.starts_with("HTTP/1.1 401"));
+        assert_eq!(denials.load(Ordering::Relaxed), 2);
+
+        // The installed-URL carrier (path token) → 200 and the event flows.
+        // The serve loop sends before responding, so the event is observable here.
+        let resp = raw_http(addr, &post("/hook/testtok", ""));
+        assert!(resp.starts_with("HTTP/1.1 200"), "expected 200, got: {resp}");
+        let ev = rx.try_recv().expect("authorized event must flow");
+        assert_eq!(ev.kind, WorkKind::AwaitingInput);
+
+        // The header carrier → 200 as well.
+        let resp = raw_http(addr, &post("/hook", "Authorization: Bearer testtok\r\n"));
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        assert!(rx.try_recv().is_ok());
+
+        // Rotation applies live: swap the shared token, old one now denied.
+        *token.write().unwrap() = "rotated".to_string();
+        let resp = raw_http(addr, &post("/hook/testtok", ""));
+        assert!(resp.starts_with("HTTP/1.1 401"));
+        let resp = raw_http(addr, &post("/hook/rotated", ""));
+        assert!(resp.starts_with("HTTP/1.1 200"));
     }
 }

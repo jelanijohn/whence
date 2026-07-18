@@ -83,8 +83,12 @@ src-tauri/src/
   commands.rs                   get_focus_state · focus_source · get_today_blocks ·
                                   get_focus_intensity · get_neuroskill_status ·
                                   get_browser_mapping_path · get/set_settings ·
-                                  install/uninstall_claude_hooks.
+                                  install/uninstall_claude_hooks ·
+                                  get_receiver_auth · rotate_receiver_token.
   orchestrator.rs               Wires adapters → segmenter → outputs (the impure seam).
+  auth.rs                       Receiver bearer token: per-install mint (0600),
+                                  PURE request check, denial counter — gates all
+                                  three loopback receivers.
   settings.rs                   Tiny JSON settings file in the app data dir.
   tray.rs                       System tray: restore the widget (left-click) + Quit
                                   (right-click menu) — the only un-hide path for the
@@ -149,7 +153,8 @@ you enable it via the `ollama` setting only if you want the bare liveness signal
 
 **Terminal cwd** (`terminal.rs`) is a *corroborator*, not an attribution source. A
 one-line shell hook POSTs `{"cwd": "$PWD", "id": "$$"}` to a loopback `tiny_http`
-listener (default `127.0.0.1:18451`, override via `terminal_listen_addr_override`)
+listener (default `127.0.0.1:18451`, override via `terminal_listen_addr_override`,
+bearer-gated — the snippet carries the receiver token as an `Authorization` header)
 on each directory change; the adapter resolves the cwd to a slug (alias map, then
 the lossless basename) and emits a low-confidence `active` event. The optional `id`
 (the shell PID) is the per-terminal source key, so two shells in one repo read as
@@ -172,12 +177,18 @@ between Claude Code *running* and *awaiting your input*. It's a small loopback
 `tiny_http` listener (default `127.0.0.1:18450`, override via
 `hook_listen_addr_override`) that Claude Code's native `http` hooks POST to,
 fire-and-forget: `Stop`/`Notification` → `awaiting_input`, `UserPromptSubmit` →
-back to `active`. Installation is **opt-in** — `install_claude_hooks` (a button in
+back to `active`. The listener is bearer-gated; since `http` hooks can't set
+headers, the token rides in the installed URL (`/hook/<token>`), so the
+install/uninstall round-trip carries auth with zero extra steps. Installation is
+**opt-in** — `install_claude_hooks` (a button in
 Settings) does a merge-preserving write of the hook config into
 `.claude/settings.json` — the *same* `.claude` dir the transcript watcher
 resolved, so on a Windows host with WSL Claude Code the hooks land in WSL's
 settings, where Claude Code actually reads them — and `uninstall_claude_hooks`
-round-trips it back out.
+round-trips it back out. Install prunes stale Whence entries under the same base
+first (an old token, or a pre-auth bare `/hook`), so upgrading or rotating is
+just clicking **Install hooks** again; rotation rewrites installed hooks
+automatically.
 The event-to-`WorkEvent` mapping is pure and fixture-tested; only the socket is
 impure.
 
@@ -187,7 +198,9 @@ can mint a project rather than merely corroborate one. A first-party MV3 browser
 extension (`extension/`, loaded unpacked) reads only the project-scoped URL and the
 provider's project id + name — a self-declared marker, never chat content or which
 tab is focused — and POSTs them to a loopback `tiny_http` listener (default
-`127.0.0.1:18452`, override via `browser_listen_addr_override`). The **daemon** owns
+`127.0.0.1:18452`, override via `browser_listen_addr_override`, bearer-gated — the
+token is pasted once into the extension's options page and sent as a header on
+observations and the `/raise` poll). The **daemon** owns
 resolution: a normalized-URL fast path, then the provider project id (stable across
 renames), else a fresh mint with `slug = slugify(name)`. Providers are selected by
 **host + path-prefix**, so one host can carry more than one surface: `claude.ai`
