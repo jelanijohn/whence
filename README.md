@@ -15,7 +15,8 @@ Whence reads the work artifacts you already produce — prompts, cwd, session
 lifecycle — never which window is foregrounded. It piggybacks on actions you were
 already taking; it never asks "what are you doing?", and it is diagnostic, never
 evaluative (no "you switched 9 times"). Local-first: no backend, no cloud, no
-auth.
+accounts — the only credential is a local per-install token its own loopback
+receivers require, so other processes can't forge attribution.
 
 ---
 
@@ -120,7 +121,8 @@ src-tauri/src/
 extension/                    First-party MV3 browser extension (claude.ai chat +
                                 Claude Design, chatgpt.com) → the browser receiver.
                                 providers.js centralizes the brittle DOM selectors,
-                                keyed by host+path; loaded unpacked.
+                                keyed by host+path; options page holds the receiver
+                                token; loaded unpacked.
 ```
 
 `engine/segment.rs` is the heart and is kept **pure** — feed it a `WorkEvent`
@@ -314,9 +316,11 @@ sources — plus an expanded today's-blocks timeline), the optional EEG intensit
 `eeg-readback` feature), the Claude Code hooks receiver for real-time
 `awaiting_input` status (v1.5, opt-in), Ollama inference liveness (v1.5,
 low-confidence status), the terminal cwd corroborator (v1.5, opt-in), the
-NeuroSkill connection-health indicator (v1.5), and the browser LLM adapter —
+NeuroSkill connection-health indicator (v1.5), the browser LLM adapter —
 claude.ai (chat + Claude Design) / chatgpt.com sessions via a first-party extension
-(opt-in, originating-capable).
+(opt-in, originating-capable) — and bearer-token auth on all three loopback
+receivers (per-install token, shown and rotatable in Settings, with a
+rejected-request counter).
 Planned: debounce calibration on real data (v1), then Who Am I inbox candidates
 and WAID intention-vs-reality (v2). See [`whence-spec.md`](whence-spec.md) §13.
 
