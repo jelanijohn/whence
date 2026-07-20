@@ -27,7 +27,7 @@ marker is the same category as reading a repo marker, not the surveillance categ
 
 Clicking a browser source row in the widget raises that tab. The daemon enqueues the
 target URL; the service worker polls `127.0.0.1:18452/raise` (loopback-only,
-unauthenticated, no page content) and activates the tab whose URL matches. The match
+bearer-gated, no page content) and activates the tab whose URL matches. The match
 is purely on the handed-in URL — the extension never reads which tab/window is
 foregrounded, so this *writes* focus without ever *reading* OS focus (§1/§2). A
 content-script keepalive port keeps the worker alive (and the poll running) only while
@@ -42,11 +42,16 @@ the loopback poll and activating the provider tabs.
    - Chrome/Edge/Brave: `chrome://extensions`
    - enable **Developer mode**, click **Load unpacked**, and select this `extension/`
      folder.
-3. Visit claude.ai or chatgpt.com. A chat filed under a project shows up as a session
+3. Open the extension's **options** page and paste the receiver token from the
+   widget's Settings → **Receiver auth** (one time; re-paste after a rotation).
+4. Visit claude.ai or chatgpt.com. A chat filed under a project shows up as a session
    row in the widget, attributed to that project's slug.
 
-The receiver is loopback-only and unauthenticated by design (principle #4); the
-extension only ever POSTs to `127.0.0.1`.
+The receiver is loopback-only and **bearer-gated**: every request carries the
+token as an `Authorization` header, so other local processes (or a drive-by web
+page POSTing at localhost) can't forge observations or read the raise queue.
+Without the token the receiver answers 401 and the widget's Settings show a
+rejected-request counter. The extension only ever POSTs to `127.0.0.1`.
 
 ## Brittleness (read this before filing a bug)
 
@@ -66,8 +71,11 @@ working:
   **All brittleness is centralized here.**
 - `content.js` — reads the page per the config, forwards observations to the worker,
   and holds a keepalive port so the worker's raise-poll stays alive while the tab is open.
-- `background.js` — relays observations to the loopback receiver, and polls the
-  `/raise` back-channel to activate a tab the widget asked to raise.
+- `background.js` — relays observations to the loopback receiver (attaching the
+  bearer token), and polls the `/raise` back-channel to activate a tab the widget
+  asked to raise.
+- `options.html` / `options.js` — the one-field options page holding the receiver
+  token (`chrome.storage.local`).
 
 To add a provider, add an entry in `providers.js` **and** extend `provider_for_host`
 in `src-tauri/src/adapters/browser.rs` (the daemon re-derives the provider from the

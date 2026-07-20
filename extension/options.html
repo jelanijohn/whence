@@ -1,0 +1,53 @@
+<!doctype html>
+<!-- Whence browser sensor — options. One field: the receiver bearer token shown in
+     the Whence widget's Settings (Receiver auth). Stored in chrome.storage.local;
+     the background worker sends it as an Authorization header on every request to
+     the loopback receiver. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font: 13px/1.5 system-ui, sans-serif;
+        margin: 16px;
+        min-width: 340px;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      p.hint {
+        color: #666;
+        font-size: 11px;
+        margin: 4px 0 10px;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+        padding: 6px;
+      }
+      button {
+        margin-top: 10px;
+        padding: 5px 14px;
+      }
+      #status {
+        margin-left: 8px;
+        font-size: 12px;
+        color: #2a7;
+      }
+    </style>
+  </head>
+  <body>
+    <label for="token">Whence receiver token</label>
+    <p class="hint">
+      Copy it from the Whence widget: Settings → Receiver auth. Without it the local
+      receiver rejects this extension's reports (401).
+    </p>
+    <input id="token" type="text" autocomplete="off" spellcheck="false" />
+    <button id="save">Save</button><span id="status"></span>
+    <script src="options.js"></script>
+  </body>
+</html>

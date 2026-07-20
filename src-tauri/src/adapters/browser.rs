@@ -377,6 +377,14 @@ fn handle(
 /// the process lifetime. Mirrors [`super::hooks::serve`]: accept fast, never block,
 /// drop malformed payloads rather than rejecting them.
 ///
+/// **Bearer-gated** (`crate::auth`), and strictly so: this receiver is
+/// *originating-capable* — a forged payload could mint projects into
+/// `browser_mapping.toml` and re-attribute focus wholesale — and `GET /raise`
+/// would otherwise hand queued conversation URLs to any local poller. The
+/// extension sends the token (pasted once into its options page) as an
+/// `Authorization` header on both. The token is read per request from the shared
+/// handle so a Settings rotation applies live.
+///
 /// The thread owns the mutable [`MappingStore`] (single-threaded, so no lock) and the
 /// per-conversation turn-count memory.
 pub fn serve(
@@ -384,6 +392,8 @@ pub fn serve(
     mut store: MappingStore,
     addr: &str,
     raise_q: RaiseQueue,
+    token: crate::auth::SharedToken,
+    denials: crate::auth::Denials,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind browser receiver on {addr}: {e}"))?;
@@ -393,6 +403,16 @@ pub fn serve(
         .spawn(move || {
             let mut last_turn: HashMap<String, u32> = HashMap::new();
             for mut req in server.incoming_requests() {
+                // Auth inside a scope: the read guard (poison-recovering, no clone)
+                // drops before the body read — mirrors the hooks receiver.
+                {
+                    let tok = crate::auth::read_token(&token);
+                    if !crate::auth::tiny_http_authorized(&req, &tok) {
+                        crate::auth::record_denial(&denials, "browser");
+                        let _ = req.respond(tiny_http::Response::empty(401));
+                        continue;
+                    }
+                }
                 // Back-channel: the extension polls here for tabs the widget asked to
                 // raise. Drain-on-read — each target is delivered once, so a raise
                 // never re-fires on the next poll. No CORS header needed: the poll

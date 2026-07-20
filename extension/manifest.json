@@ -1,14 +1,19 @@
 {
   "manifest_version": 3,
   "name": "Whence — Browser LLM sensor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Feeds browser-hosted AI chat (claude.ai, chatgpt.com) project identity into the local Whence widget, and raises a tab when you click its row in the widget. Producer-side: reads only the self-declared project, never chat content.",
+  "permissions": ["storage"],
   "host_permissions": [
     "https://claude.ai/*",
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "http://127.0.0.1/*"
   ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
   "background": {
     "service_worker": "background.js"
   },

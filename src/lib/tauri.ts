@@ -7,6 +7,7 @@ import type {
   FocusBlock,
   Settings,
   NeuroskillStatus,
+  ReceiverAuth,
 } from "./types";
 
 export const FOCUS_EVENT = "whence://focus";
@@ -59,6 +60,18 @@ export function installClaudeHooks(): Promise<void> {
 /** Remove Whence's Claude Code hooks, leaving other config intact. */
 export function uninstallClaudeHooks(): Promise<void> {
   return invoke("uninstall_claude_hooks");
+}
+
+/** Receiver-auth state: the bearer token gating the loopback receivers, its file
+ *  path, and the rejected-request counter. Drives the Settings auth section. */
+export function getReceiverAuth(): Promise<ReceiverAuth> {
+  return invoke("get_receiver_auth");
+}
+
+/** Mint + persist a new receiver token and apply it live; installed Claude hooks
+ *  are rewritten to the new URL. Terminal snippet / extension need a re-paste. */
+export function rotateReceiverToken(): Promise<ReceiverAuth> {
+  return invoke("rotate_receiver_token");
 }
 
 /** Subscribe to live focus updates. Returns an unlisten fn. */
