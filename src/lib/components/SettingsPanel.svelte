@@ -45,6 +45,17 @@
   let saving = $state(false);
   let saved = $state(false);
   let error = $state<string | null>(null);
+
+  // Transient "flash" banners (Saved / Hooks installed / Token rotated) auto-clear
+  // on a timer. Handles are tracked so closing the panel mid-flash cancels the
+  // callback instead of letting it fire into a destroyed component.
+  let flashTimers: ReturnType<typeof setTimeout>[] = [];
+  function flash(clear: () => void, ms: number) {
+    flashTimers.push(setTimeout(clear, ms));
+  }
+  onDestroy(() => {
+    for (const t of flashTimers) clearTimeout(t);
+  });
   // The last-saved snapshot, used to detect dirty state.
   let baseline = $state<Settings | undefined>();
   let draft = $state<Draft | undefined>();
@@ -205,7 +216,7 @@
     try {
       receiverAuth = await rotateReceiverToken();
       authMsg = "Token rotated — update your shell hook / extension";
-      setTimeout(() => (authMsg = null), 4000);
+      flash(() => (authMsg = null), 4000);
     } catch (e) {
       authErr = String(e);
     } finally {
@@ -252,7 +263,7 @@
       baseline = result;
       draft = toDraft(result); // re-sync: blank alias rows / trimmed values fall away
       saved = true;
-      setTimeout(() => (saved = false), 1800);
+      flash(() => (saved = false), 1800);
     } catch (e) {
       error = String(e);
     } finally {
@@ -274,7 +285,7 @@
     try {
       await action();
       hooksMsg = ok;
-      setTimeout(() => (hooksMsg = null), 2400);
+      flash(() => (hooksMsg = null), 2400);
     } catch (e) {
       hooksErr = String(e);
     } finally {
