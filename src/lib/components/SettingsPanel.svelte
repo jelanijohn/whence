@@ -51,7 +51,11 @@
   // callback instead of letting it fire into a destroyed component.
   let flashTimers: ReturnType<typeof setTimeout>[] = [];
   function flash(clear: () => void, ms: number) {
-    flashTimers.push(setTimeout(clear, ms));
+    const t = setTimeout(() => {
+      flashTimers = flashTimers.filter((h) => h !== t); // self-prune: stays bounded
+      clear();
+    }, ms);
+    flashTimers.push(t);
   }
   onDestroy(() => {
     for (const t of flashTimers) clearTimeout(t);
@@ -215,10 +219,19 @@
     authErr = null;
     try {
       receiverAuth = await rotateReceiverToken();
-      authMsg = "Token rotated — update your shell hook / extension";
-      flash(() => (authMsg = null), 4000);
+      if (receiverAuth.warning) {
+        // Rotation succeeded — the shown token is the new, live one — but the
+        // installed-hooks rewrite didn't; keep the instruction visible (no flash).
+        authErr = receiverAuth.warning;
+      } else {
+        authMsg = "Token rotated — update your shell hook / extension";
+        flash(() => (authMsg = null), 4000);
+      }
     } catch (e) {
+      // Err = the rotation didn't happen (old token still live). Re-fetch anyway
+      // so the panel always shows the receivers' actual live state.
       authErr = String(e);
+      await refreshReceiverAuth();
     } finally {
       authBusy = false;
     }

@@ -249,6 +249,12 @@ pub struct ReceiverAuth {
     pub token: String,
     pub token_path: String,
     pub denials: u64,
+    /// Set when the operation succeeded but a best-effort follow-up didn't (a
+    /// rotation whose installed-hooks rewrite failed). The state above is still
+    /// the live truth — the warning tells the user what to do next, without the
+    /// UI mistaking a done rotation for a failed one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Current receiver-auth state — drives the Settings section (token display, the
@@ -259,15 +265,19 @@ pub fn get_receiver_auth(state: State<AppState>) -> ReceiverAuth {
         token: crate::auth::read_token(&state.receiver_token).clone(),
         token_path: crate::auth::token_path(&state.data_dir).to_string_lossy().into_owned(),
         denials: state.auth_denials.load(std::sync::atomic::Ordering::Relaxed),
+        warning: None,
     }
 }
 
 /// Rotate the receiver token: mint + persist a new one and apply it to the live
 /// listeners immediately. If Claude Code hooks are installed, their URLs are
-/// rewritten to carry the new token in the same pass (best-effort — a failure
-/// there is reported but doesn't undo the rotation; re-running "Install hooks"
-/// recovers). The terminal snippet and extension need the new token pasted —
-/// that's the point of a rotation.
+/// rewritten to carry the new token in the same pass (best-effort). `Err` means
+/// the rotation itself didn't happen (persist failed; the old token is still
+/// live everywhere). A rotation that succeeded but couldn't rewrite the hooks
+/// returns `Ok` with a `warning` — the new token IS live, and reporting that as
+/// an error would leave the UI showing a token the receivers no longer accept.
+/// The terminal snippet and extension need the new token pasted — that's the
+/// point of a rotation.
 #[tauri::command]
 pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, String> {
     let token = crate::auth::rotate(&state.data_dir)
@@ -292,14 +302,15 @@ pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, Str
         let merged = merge_hook_config(remove_hook_config(existing, &base), &hook_url(&state));
         write_json_pretty(&path, &merged)
     })();
+
+    let mut auth = get_receiver_auth(state);
     if let Err(e) = refresh {
-        return Err(format!(
-            "token rotated, but the installed Claude hooks could not be updated ({e}) — \
+        auth.warning = Some(format!(
+            "Token rotated, but the installed Claude hooks could not be updated ({e}) — \
              re-run Install hooks"
         ));
     }
-
-    Ok(get_receiver_auth(state))
+    Ok(auth)
 }
 
 /// The receiver URL written into the hook config — `http://<bind>/hook/<token>`,

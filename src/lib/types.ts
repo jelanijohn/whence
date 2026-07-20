@@ -95,6 +95,9 @@ export interface ReceiverAuth {
   token: string;
   tokenPath: string;
   denials: number;
+  // Present when the operation succeeded but a best-effort follow-up didn't
+  // (rotation OK, installed-hooks rewrite failed). The other fields are live truth.
+  warning?: string | null;
 }
 
 export interface Settings {
