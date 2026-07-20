@@ -93,18 +93,29 @@ fn mint_token() -> String {
 }
 
 /// Write the token `0600` (owner-only) on Unix; on Windows the app data dir is
-/// already per-user under the profile ACLs. `set_permissions` after the write
-/// also tightens a pre-existing file that was created looser.
+/// already per-user under the profile ACLs. The mode is set **at creation** so
+/// there is never a window where the file exists with umask-default (possibly
+/// world-readable) perms; the follow-up `set_permissions` covers the one case
+/// creation-mode can't — a pre-existing file minted looser by an older build.
 fn persist(path: &Path, token: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, token)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(token.as_bytes())?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(path, token)?;
     Ok(())
 }
 
