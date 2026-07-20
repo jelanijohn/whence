@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Whence — ambient focus widget + local attribution sensor."
 authors = ["Jelani John"]
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin on Windows.

@@ -13,7 +13,7 @@
     "tauri:wsl": "WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev",
     "tauri:dev2": "WHENCE_DEV_PORT=1435 WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev --config '{\"build\":{\"devUrl\":\"http://localhost:1435\"}}'"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2"

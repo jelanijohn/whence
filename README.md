@@ -328,3 +328,7 @@ By design Whence does **not**: scrape OS window/app focus (banned by principle),
 score or grade your focus (diagnostic only), touch the phone (desktop sensor
 only), or auto-write to anyone's record (it proposes; humans promote). It runs
 and stays entirely on-device.
+
+## License
+
+[GPL-3.0-or-later](LICENSE).
