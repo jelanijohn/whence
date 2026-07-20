@@ -128,11 +128,15 @@ pub fn serve(
         .name("whence-terminal".into())
         .spawn(move || {
             for mut req in server.incoming_requests() {
-                let tok = token.read().map(|t| t.clone()).unwrap_or_default();
-                if !crate::auth::tiny_http_authorized(&req, &tok) {
-                    crate::auth::record_denial(&denials, "terminal");
-                    let _ = req.respond(tiny_http::Response::empty(401));
-                    continue;
+                // Auth inside a scope: the read guard (poison-recovering, no clone)
+                // drops before the body read — mirrors the hooks receiver.
+                {
+                    let tok = crate::auth::read_token(&token);
+                    if !crate::auth::tiny_http_authorized(&req, &tok) {
+                        crate::auth::record_denial(&denials, "terminal");
+                        let _ = req.respond(tiny_http::Response::empty(401));
+                        continue;
+                    }
                 }
                 let mut body = String::new();
                 if req.as_reader().read_to_string(&mut body).is_ok() {

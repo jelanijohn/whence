@@ -143,13 +143,22 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// The impure shim over [`request_authorized`] for a `tiny_http` request: pull
 /// the `Authorization` header (field names are case-insensitive) and the URL.
+/// Borrows straight from the request — no per-request allocation.
 pub fn tiny_http_authorized(req: &tiny_http::Request, token: &str) -> bool {
     let header = req
         .headers()
         .iter()
         .find(|h| h.field.equiv("Authorization"))
-        .map(|h| h.value.as_str().to_string());
-    request_authorized(header.as_deref(), req.url(), token)
+        .map(|h| h.value.as_str());
+    request_authorized(header, req.url(), token)
+}
+
+/// Read the live token, recovering a poisoned lock. The data is a plain `String`
+/// whose writes are single assignments, so the value is intact even if some
+/// holder panicked — recovering beats the alternatives (an empty token would
+/// silently deny everything until restart; a stale one would undo a rotation).
+pub fn read_token(token: &SharedToken) -> std::sync::RwLockReadGuard<'_, String> {
+    token.read().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Count one denied request. Logging is capped (first few, then every 100th) so

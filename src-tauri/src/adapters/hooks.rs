@@ -194,10 +194,11 @@ fn basename(cwd: &str) -> Option<String> {
 }
 
 /// Bind the loopback hook endpoint and serve forever on a dedicated thread,
-/// emitting `WorkEvent`s on `tx`. Returns once the socket is bound (an error means
-/// the bind failed — e.g. the port is taken); the serving loop then runs for the
-/// process lifetime. The spawned thread owns the `Server`, so the listener lives
-/// as long as the process without a handle to hold.
+/// emitting `WorkEvent`s on `tx`. Returns the **bound address** once the socket is
+/// up (so a `:0` bind reports its ephemeral port — how the e2e test avoids a fixed
+/// port); an error means the bind failed — e.g. the port is taken. The serving
+/// loop then runs for the process lifetime. The spawned thread owns the `Server`,
+/// so the listener lives as long as the process without a handle to hold.
 ///
 /// **Bearer-gated** (`crate::auth`): Claude Code `http` hooks can't set headers,
 /// so `install_claude_hooks` embeds the token in the URL (`/hook/<token>`) and the
@@ -216,19 +217,28 @@ pub fn serve(
     transcripts_root: Option<std::path::PathBuf>,
     token: crate::auth::SharedToken,
     denials: crate::auth::Denials,
-) -> Result<(), String> {
+) -> Result<std::net::SocketAddr, String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind hook receiver on {addr}: {e}"))?;
+    let bound = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| format!("hook receiver on {addr} bound to a non-IP address"))?;
 
     std::thread::Builder::new()
         .name("whence-hooks".into())
         .spawn(move || {
             for mut req in server.incoming_requests() {
-                let tok = token.read().map(|t| t.clone()).unwrap_or_default();
-                if !crate::auth::tiny_http_authorized(&req, &tok) {
-                    crate::auth::record_denial(&denials, "hooks");
-                    let _ = req.respond(tiny_http::Response::empty(401));
-                    continue;
+                // Auth inside a scope: the read guard (poison-recovering, no clone)
+                // drops before the body read, so a rotation never waits on a slow
+                // caller.
+                {
+                    let tok = crate::auth::read_token(&token);
+                    if !crate::auth::tiny_http_authorized(&req, &tok) {
+                        crate::auth::record_denial(&denials, "hooks");
+                        let _ = req.respond(tiny_http::Response::empty(401));
+                        continue;
+                    }
                 }
                 let mut body = String::new();
                 // Read the POST body; on a read error just respond and move on.
@@ -249,7 +259,7 @@ pub fn serve(
         })
         .map_err(|e| format!("could not spawn hook receiver thread: {e}"))?;
 
-    Ok(())
+    Ok(bound)
 }
 
 #[cfg(test)]
@@ -449,12 +459,14 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::{Arc, RwLock};
 
-        // A real listener on an uncommon test port, gated by a known token.
-        let addr = "127.0.0.1:28450";
+        // A real listener on an ephemeral port (`:0` — the OS picks a free one,
+        // reported back by `serve`), gated by a known token.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let token: crate::auth::SharedToken = Arc::new(RwLock::new("testtok".to_string()));
         let denials: crate::auth::Denials = Arc::new(AtomicU64::new(0));
-        serve(tx, no_aliases(), addr, None, token.clone(), denials.clone()).unwrap();
+        let bound =
+            serve(tx, no_aliases(), "127.0.0.1:0", None, token.clone(), denials.clone()).unwrap();
+        let addr = &bound.to_string();
 
         let body = r#"{"hook_event_name":"Stop","cwd":"/root/Projects/whence"}"#;
         let post = |path: &str, extra: &str| {

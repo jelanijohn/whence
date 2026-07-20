@@ -403,11 +403,15 @@ pub fn serve(
         .spawn(move || {
             let mut last_turn: HashMap<String, u32> = HashMap::new();
             for mut req in server.incoming_requests() {
-                let tok = token.read().map(|t| t.clone()).unwrap_or_default();
-                if !crate::auth::tiny_http_authorized(&req, &tok) {
-                    crate::auth::record_denial(&denials, "browser");
-                    let _ = req.respond(tiny_http::Response::empty(401));
-                    continue;
+                // Auth inside a scope: the read guard (poison-recovering, no clone)
+                // drops before the body read — mirrors the hooks receiver.
+                {
+                    let tok = crate::auth::read_token(&token);
+                    if !crate::auth::tiny_http_authorized(&req, &tok) {
+                        crate::auth::record_denial(&denials, "browser");
+                        let _ = req.respond(tiny_http::Response::empty(401));
+                        continue;
+                    }
                 }
                 // Back-channel: the extension polls here for tabs the widget asked to
                 // raise. Drain-on-read — each target is delivered once, so a raise

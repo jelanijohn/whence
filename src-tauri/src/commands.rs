@@ -256,7 +256,7 @@ pub struct ReceiverAuth {
 #[tauri::command]
 pub fn get_receiver_auth(state: State<AppState>) -> ReceiverAuth {
     ReceiverAuth {
-        token: state.receiver_token.read().map(|t| t.clone()).unwrap_or_default(),
+        token: crate::auth::read_token(&state.receiver_token).clone(),
         token_path: crate::auth::token_path(&state.data_dir).to_string_lossy().into_owned(),
         denials: state.auth_denials.load(std::sync::atomic::Ordering::Relaxed),
     }
@@ -272,9 +272,13 @@ pub fn get_receiver_auth(state: State<AppState>) -> ReceiverAuth {
 pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, String> {
     let token = crate::auth::rotate(&state.data_dir)
         .map_err(|e| format!("could not persist the new token: {e}"))?;
-    if let Ok(mut guard) = state.receiver_token.write() {
-        *guard = token;
-    }
+    // Recover a poisoned lock rather than skip: silently keeping the old token
+    // live (while the new one is already on disk) would desync the receivers and
+    // make the hook refresh below re-embed the *old* token.
+    *state
+        .receiver_token
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = token;
 
     // Refresh installed hooks to the new URL. Only rewrite when our hooks are
     // actually present — rotation must not install hooks the user never opted into.
@@ -303,8 +307,8 @@ pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, Str
 /// using and the token is the live receiver bearer token (the `http` hook's only
 /// way to carry a credential).
 fn hook_url(state: &State<AppState>) -> String {
-    let token = state.receiver_token.read().map(|t| t.clone()).unwrap_or_default();
-    format!("{}/{token}", hook_base_url(state))
+    let token = crate::auth::read_token(&state.receiver_token);
+    format!("{}/{}", hook_base_url(state), *token)
 }
 
 /// The token-less hook URL prefix — the identity by which *any* generation of
