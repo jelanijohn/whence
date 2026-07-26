@@ -40,10 +40,15 @@ let unlisten: UnlistenFn | null = null;
 /** Hydrate once, then track settings saves — the widget's cross-window feed. */
 export async function startAppearance(): Promise<void> {
   await loadAppearance();
-  unlisten = await onSettingsChanged((s) => {
-    appearance.opacity = clampOpacity(s.widgetOpacity);
-    appearance.dark = s.darkMode;
-  });
+  try {
+    unlisten = await onSettingsChanged((s) => {
+      appearance.opacity = clampOpacity(s.widgetOpacity);
+      appearance.dark = s.darkMode;
+    });
+  } catch {
+    // Backend not up (e.g. `vite dev` without Tauri) — hydration above already
+    // fell back to defaults; live updates just won't arrive.
+  }
 }
 
 export function stopAppearance(): void {
