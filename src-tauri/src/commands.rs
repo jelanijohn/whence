@@ -34,6 +34,10 @@ pub struct AppState {
     /// The live receiver bearer token — shared with the three listener threads, so a
     /// rotation here applies to them without a restart.
     pub receiver_token: crate::auth::SharedToken,
+    /// Live context moments — held here so disabling a moment source in Settings
+    /// purges its already-captured text immediately (not just hides it until the
+    /// block closes).
+    pub moments: crate::context::SharedMoments,
     /// Denied (401) receiver requests since launch — the Settings diagnostic.
     pub auth_denials: crate::auth::Denials,
 }
@@ -158,13 +162,15 @@ pub fn set_settings(
     state: State<AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
-    // Reconcile autostart with the OS only when it actually changed, so we don't
-    // re-register on every settings save.
-    let prev_autostart = state
+    let prev = state
         .settings
         .lock()
-        .map(|g| g.autostart)
-        .unwrap_or(false);
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    // Reconcile autostart with the OS only when it actually changed, so we don't
+    // re-register on every settings save.
+    let prev_autostart = prev.autostart;
     if settings.autostart != prev_autostart {
         let mgr = app.autolaunch();
         let res = if settings.autostart {
@@ -179,6 +185,28 @@ pub fn set_settings(
         .map_err(|e| format!("could not save settings: {e}"))?;
     if let Ok(mut g) = state.settings.lock() {
         *g = settings.clone();
+    }
+
+    // A moment source whose effective gate (the same conjunction the receivers
+    // capture under) just turned off gets its stored text dropped now — an
+    // opt-in privacy gate must release captured content on disable, not retain
+    // it hidden until the block closes.
+    let gates = [
+        (
+            crate::context::ContextSource::HookPrompt,
+            prev.context_strings && prev.context_hook_prompts,
+            settings.context_strings && settings.context_hook_prompts,
+        ),
+        (
+            crate::context::ContextSource::BrowserTitle,
+            prev.context_strings && prev.context_browser_titles,
+            settings.context_strings && settings.context_browser_titles,
+        ),
+    ];
+    for (source, was_on, is_on) in gates {
+        if was_on && !is_on {
+            crate::context::purge_source(&state.moments, source);
+        }
     }
 
     // Apply the window flags to the live `main` window. Idempotent, so no

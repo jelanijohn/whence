@@ -103,6 +103,7 @@ pub fn run() {
                 raise_queue: raise_queue.clone(),
                 receiver_token: receiver_token.clone(),
                 auth_denials: auth_denials.clone(),
+                moments: moments.clone(),
             });
 
             // The core task and the hooks receiver read settings through the

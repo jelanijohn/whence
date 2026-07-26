@@ -149,6 +149,16 @@ pub fn clear_moment(moments: &SharedMoments, slug: &str) {
     }
 }
 
+/// Drop every stored moment from `source`, across all slugs. Turning a source's
+/// opt-in gate *off* calls this so already-captured text is released immediately
+/// — a disabled privacy gate must not keep hiding retained content until the
+/// block happens to close (spec §10).
+pub fn purge_source(moments: &SharedMoments, source: ContextSource) {
+    if let Ok(mut g) = moments.lock() {
+        g.retain(|_, m| m.source != source);
+    }
+}
+
 // --- Per-root cache -----------------------------------------------------------
 
 /// Per-root resolution cache with in-flight dedup (spec §4). `None` results are
@@ -417,6 +427,22 @@ mod tests {
         assert_eq!(c.observed_at, 42);
         // No subject resolved → branch alone (spec §4).
         assert_eq!(assemble("feat/x", None, 0).text, "feat/x");
+    }
+
+    // --- Moments ---------------------------------------------------------------
+
+    #[test]
+    fn purge_source_drops_only_that_source() {
+        let moments = new_moments();
+        record_moment(&moments, "whence", "fix the parser", ContextSource::HookPrompt, 10);
+        record_moment(&moments, "glue", "Debugging auth", ContextSource::BrowserTitle, 11);
+        purge_source(&moments, ContextSource::HookPrompt);
+        // The disabled source's text is gone; the other source's moment survives.
+        assert_eq!(moment_for(&moments, "whence"), None);
+        assert_eq!(
+            moment_for(&moments, "glue").map(|m| m.source),
+            Some(ContextSource::BrowserTitle)
+        );
     }
 
     // --- Cache -----------------------------------------------------------------
