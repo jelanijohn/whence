@@ -50,9 +50,12 @@ export type NeuroskillStatus =
   | "unreachable"
   | "unknown";
 
-// Where a context string came from. One source today (git); future sources each
-// arrive behind their own opt-in gate (docs/context-strings.md §10).
-export type ContextSource = "git";
+// Where a context string came from (docs/context-strings.md §10). git = branch ·
+// commit subject (user-authored, default on); hook_prompt = your prompt snippet /
+// session summary via the Claude Code hooks; browser_title = the conversation's
+// title via the extension. The content-derived sources are opt-in and display-
+// only: never stamped onto persisted blocks.
+export type ContextSource = "git" | "hook_prompt" | "browser_title";
 
 // A display-only context line for the focused project ("main · fix HEAD parser").
 // Mirrors `ContextString` in src-tauri/src/context.rs. Never an attribution
@@ -143,6 +146,8 @@ export interface Settings {
   browserListenAddrOverride?: string | null; // override browser receiver bind; null = default 127.0.0.1:18452
   contextStrings: boolean; // show git branch · commit beside the focus + stamp blocks; display-only, default true
   contextTtlSeconds: number; // context re-resolve interval; settings-file-only knob (no UI)
+  contextHookPrompts: boolean; // also show prompt snippet / session summary from CC hooks; opt-in, display-only (never persisted)
+  contextBrowserTitles: boolean; // also show the browser conversation's title; opt-in, display-only (never persisted)
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block
   corroboratorConfidenceCutoff: number; // ≥ this = primary signal; below = weak hint (§7)

@@ -49,6 +49,11 @@ pub struct HookPayload {
     /// the input-awaiting kinds become `AwaitingInput`.
     #[serde(default)]
     pub notification_type: Option<String>,
+    /// For `UserPromptSubmit`: the prompt text you typed. Only *retained* (as a
+    /// sanitized snippet on `WorkEvent.detail`) when the opt-in hook-prompt
+    /// context source is on — otherwise dropped at this boundary, never carried.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 /// Map a hook payload to a `WorkEvent`, or `None` for events we don't act on.
@@ -58,11 +63,18 @@ pub struct HookPayload {
 /// the transcript watcher uses, so hook-derived attribution matches it.
 /// `transcripts_root` is *our* view of the transcript tree, for rebasing a
 /// payload path minted on a different filesystem (see [`local_transcript_path`]).
+///
+/// `capture_context` is the live hook-prompt context gate (docs/context-strings.md
+/// §10): when on, a `UserPromptSubmit` carries a sanitized snippet of your prompt
+/// and a `SessionStart` the transcript's session summary, both on `detail` — the
+/// orchestrator turns those into the displayed context string. When off, the
+/// prompt text is dropped *here*, at the capture boundary, not downstream.
 pub fn hook_to_event(
     p: &HookPayload,
     aliases: &HashMap<String, String>,
     transcripts_root: Option<&std::path::Path>,
     now_rfc3339: &str,
+    capture_context: bool,
 ) -> Option<WorkEvent> {
     let kind = match p.hook_event_name.as_str() {
         "UserPromptSubmit" => WorkKind::Prompt,
@@ -91,6 +103,32 @@ pub fn hook_to_event(
     // the same as for focus evidence.
     let project = resolve_slug(p, aliases, transcripts_root);
 
+    // Context-moment capture (opt-in): the prompt snippet on a Prompt, the session
+    // summary on a SessionStart (a resumed/compacted transcript names the thread
+    // being continued — useful before you've typed anything). Sanitized and capped
+    // at the same bound as every context string. `detail` rides through the engine
+    // untouched (segment.rs never reads it) and the orchestrator harvests it.
+    let detail = if capture_context {
+        match kind {
+            WorkKind::Prompt => p
+                .prompt
+                .as_deref()
+                .map(crate::context::sanitize)
+                .filter(|s| !s.is_empty()),
+            WorkKind::SessionStart => p
+                .transcript_path
+                .as_deref()
+                .and_then(|t| {
+                    claude_code::first_summary(&local_transcript_path(t, transcripts_root))
+                })
+                .map(|s| crate::context::sanitize(&s))
+                .filter(|s| !s.is_empty()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     Some(WorkEvent {
         ts: now_rfc3339.to_string(),
         surface: Surface::ClaudeCode,
@@ -101,7 +139,7 @@ pub fn hook_to_event(
         source_label: None, // engine labels it "claude code"
         kind,
         confidence: 1.0, // cwd-derived attribution, same as the transcript adapter
-        detail: None,
+        detail,
     })
 }
 
@@ -207,6 +245,12 @@ fn basename(cwd: &str) -> Option<String> {
 /// you-acted `Prompt`, the strongest signal in the trust model. The token is read
 /// per request from the shared handle so a Settings rotation applies live.
 ///
+/// `settings` is the live shared handle, read per request for the hook-prompt
+/// context gate (`context_strings && context_hook_prompts`) — a Settings toggle
+/// starts/stops prompt-snippet retention without a restart. `moments` is where a
+/// captured snippet/summary is recorded as its project's live context moment
+/// (receivers record; the orchestrator arbitrates and clears — context.rs).
+///
 /// Every authorized request gets a `200` with an empty body — Claude Code ignores
 /// the response, and the receiver's only contract is "accept fast, never block".
 /// Malformed or unrecognized payloads are accepted and dropped, not rejected.
@@ -217,6 +261,8 @@ pub fn serve(
     transcripts_root: Option<std::path::PathBuf>,
     token: crate::auth::SharedToken,
     denials: crate::auth::Denials,
+    settings: std::sync::Arc<std::sync::Mutex<crate::settings::Settings>>,
+    moments: crate::context::SharedMoments,
 ) -> Result<std::net::SocketAddr, String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind hook receiver on {addr}: {e}"))?;
@@ -245,9 +291,30 @@ pub fn serve(
                 if req.as_reader().read_to_string(&mut body).is_ok() {
                     if let Ok(payload) = serde_json::from_str::<HookPayload>(&body) {
                         let now = chrono::Utc::now().to_rfc3339();
-                        if let Some(ev) =
-                            hook_to_event(&payload, &aliases, transcripts_root.as_deref(), &now)
-                        {
+                        let capture = settings
+                            .lock()
+                            .map(|s| s.context_strings && s.context_hook_prompts)
+                            .unwrap_or(false);
+                        if let Some(ev) = hook_to_event(
+                            &payload,
+                            &aliases,
+                            transcripts_root.as_deref(),
+                            &now,
+                            capture,
+                        ) {
+                            // A captured snippet/summary (detail is only set when the
+                            // gate was on) becomes the project's live context moment.
+                            if let (Some(project), Some(text), Some(ts)) =
+                                (&ev.project, &ev.detail, ev.ts_secs())
+                            {
+                                crate::context::record_moment(
+                                    &moments,
+                                    project,
+                                    text,
+                                    crate::context::ContextSource::HookPrompt,
+                                    ts,
+                                );
+                            }
                             // Unbounded send never blocks; an error only means the
                             // core task is gone (shutdown), so dropping is correct.
                             let _ = tx.send(ev);
@@ -276,6 +343,7 @@ mod tests {
                 "/home/u/.claude/projects/-root-Projects-whence/s.jsonl".into(),
             ),
             notification_type: None,
+            prompt: None,
         }
     }
 
@@ -285,7 +353,7 @@ mod tests {
 
     #[test]
     fn stop_is_awaiting_input_and_carries_its_project() {
-        let ev = hook_to_event(&payload("Stop"), &no_aliases(), None, NOW).unwrap();
+        let ev = hook_to_event(&payload("Stop"), &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
         assert_eq!(ev.surface, Surface::ClaudeCode);
         // Status-only, but still attributed so its row knows which session is awaiting.
@@ -301,7 +369,7 @@ mod tests {
     fn prompt_is_focus_evidence_resolves_project() {
         // payload()'s transcript_path doesn't exist, so resolution falls through to
         // the dir-name heuristic — still "whence".
-        let ev = hook_to_event(&payload("UserPromptSubmit"), &no_aliases(), None, NOW).unwrap();
+        let ev = hook_to_event(&payload("UserPromptSubmit"), &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.kind, WorkKind::Prompt);
         assert!(ev.kind.is_focus_evidence());
         assert_eq!(ev.project.as_deref(), Some("whence"));
@@ -330,8 +398,9 @@ mod tests {
             cwd: Some("/root/Projects/blapp-web/packages/api".into()), // drifted
             transcript_path: Some(path.to_string_lossy().into_owned()),
             notification_type: None,
+            prompt: None,
         };
-        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
         // Launch dir "blapp-web" beats the drifted cwd ("api") and lossy dir-name ("web").
         assert_eq!(ev.project.as_deref(), Some("blapp-web"));
 
@@ -359,8 +428,9 @@ mod tests {
                 "/root/.claude/projects/-root-Projects-blapp-web/rebase-session.jsonl".into(),
             ),
             notification_type: None,
+            prompt: None,
         };
-        let ev = hook_to_event(&p, &no_aliases(), Some(&root), NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), Some(&root), NOW, false).unwrap();
         // Rebased cwd read gives "blapp-web"; the dir-name fallback would say "web".
         assert_eq!(ev.project.as_deref(), Some("blapp-web"));
 
@@ -373,7 +443,7 @@ mod tests {
         let mut p = payload("UserPromptSubmit");
         p.transcript_path = None;
         p.cwd = Some("/root/Projects/glue".into());
-        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.project.as_deref(), Some("glue"));
     }
 
@@ -381,7 +451,7 @@ mod tests {
     fn prompt_alias_overrides_cwd() {
         let mut aliases = HashMap::new();
         aliases.insert("-root-Projects-whence".to_string(), "whence-canonical".to_string());
-        let ev = hook_to_event(&payload("UserPromptSubmit"), &aliases, None, NOW).unwrap();
+        let ev = hook_to_event(&payload("UserPromptSubmit"), &aliases, None, NOW, false).unwrap();
         assert_eq!(ev.project.as_deref(), Some("whence-canonical"));
     }
 
@@ -390,7 +460,7 @@ mod tests {
         // Hyphenated dir name resolves lossily, but it's all we have without cwd.
         let mut p = payload("UserPromptSubmit");
         p.cwd = None;
-        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.project.as_deref(), Some("whence"));
     }
 
@@ -399,40 +469,89 @@ mod tests {
         let mut idle = payload("Notification");
         idle.notification_type = Some("idle_prompt".into());
         assert_eq!(
-            hook_to_event(&idle, &no_aliases(), None, NOW).unwrap().kind,
+            hook_to_event(&idle, &no_aliases(), None, NOW, false).unwrap().kind,
             WorkKind::AwaitingInput
         );
 
         let mut perm = payload("Notification");
         perm.notification_type = Some("permission_prompt".into());
         assert_eq!(
-            hook_to_event(&perm, &no_aliases(), None, NOW).unwrap().kind,
+            hook_to_event(&perm, &no_aliases(), None, NOW, false).unwrap().kind,
             WorkKind::AwaitingInput
         );
 
         // A non-input notification (e.g. auth_success) is not a status signal.
         let mut other = payload("Notification");
         other.notification_type = Some("auth_success".into());
-        assert!(hook_to_event(&other, &no_aliases(), None, NOW).is_none());
+        assert!(hook_to_event(&other, &no_aliases(), None, NOW, false).is_none());
     }
 
     #[test]
     fn session_lifecycle_maps_through() {
         assert_eq!(
-            hook_to_event(&payload("SessionStart"), &no_aliases(), None, NOW).unwrap().kind,
+            hook_to_event(&payload("SessionStart"), &no_aliases(), None, NOW, false).unwrap().kind,
             WorkKind::SessionStart
         );
         assert_eq!(
-            hook_to_event(&payload("SessionEnd"), &no_aliases(), None, NOW).unwrap().kind,
+            hook_to_event(&payload("SessionEnd"), &no_aliases(), None, NOW, false).unwrap().kind,
             WorkKind::SessionEnd
         );
     }
 
     #[test]
     fn tool_and_unknown_events_are_ignored() {
-        assert!(hook_to_event(&payload("PreToolUse"), &no_aliases(), None, NOW).is_none());
-        assert!(hook_to_event(&payload("PostToolUse"), &no_aliases(), None, NOW).is_none());
-        assert!(hook_to_event(&payload("SomethingNew"), &no_aliases(), None, NOW).is_none());
+        assert!(hook_to_event(&payload("PreToolUse"), &no_aliases(), None, NOW, false).is_none());
+        assert!(hook_to_event(&payload("PostToolUse"), &no_aliases(), None, NOW, false).is_none());
+        assert!(hook_to_event(&payload("SomethingNew"), &no_aliases(), None, NOW, false).is_none());
+    }
+
+    #[test]
+    fn prompt_snippet_captured_only_when_gated_on() {
+        let mut p = payload("UserPromptSubmit");
+        p.prompt = Some("  fix the\nHEAD parser\t\u{7} fixtures  ".into());
+
+        // Gate off (the default): the prompt text is dropped at this boundary.
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.detail, None);
+
+        // Gate on: a sanitized single-line snippet rides on detail.
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, true).unwrap();
+        assert_eq!(ev.detail.as_deref(), Some("fix the HEAD parser fixtures"));
+
+        // An empty/whitespace prompt yields no snippet, not an empty string.
+        p.prompt = Some("   \n ".into());
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, true).unwrap();
+        assert_eq!(ev.detail, None);
+
+        // Status events never carry a snippet even when gated on.
+        let mut stop = payload("Stop");
+        stop.prompt = Some("should never appear".into());
+        let ev = hook_to_event(&stop, &no_aliases(), None, NOW, true).unwrap();
+        assert_eq!(ev.detail, None);
+    }
+
+    #[test]
+    fn session_start_captures_transcript_summary_when_gated_on() {
+        use std::io::Write;
+        // A resumed transcript with a head summary line — the SessionStart moment.
+        let root = std::env::temp_dir().join("whence-hooks-summary-root");
+        let dir = root.join("-root-Projects-whence");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("resumed.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{{\"type\":\"summary\",\"summary\":\"Context strings v1\"}}").unwrap();
+        writeln!(f, "{{\"type\":\"user\",\"cwd\":\"/root/Projects/whence\"}}").unwrap();
+
+        let mut p = payload("SessionStart");
+        p.transcript_path = Some(path.to_string_lossy().into_owned());
+
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, true).unwrap();
+        assert_eq!(ev.detail.as_deref(), Some("Context strings v1"));
+        // Gate off → no summary retained.
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.detail, None);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -440,7 +559,7 @@ mod tests {
         // Only hook_event_name is required; extra fields are ignored.
         let json = r#"{"hook_event_name":"Stop","session_id":"x","future_field":42}"#;
         let p: HookPayload = serde_json::from_str(json).unwrap();
-        let ev = hook_to_event(&p, &no_aliases(), None, NOW).unwrap();
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
     }
 
@@ -464,8 +583,19 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let token: crate::auth::SharedToken = Arc::new(RwLock::new("testtok".to_string()));
         let denials: crate::auth::Denials = Arc::new(AtomicU64::new(0));
-        let bound =
-            serve(tx, no_aliases(), "127.0.0.1:0", None, token.clone(), denials.clone()).unwrap();
+        let settings = Arc::new(std::sync::Mutex::new(crate::settings::Settings::default()));
+        let moments = crate::context::new_moments();
+        let bound = serve(
+            tx,
+            no_aliases(),
+            "127.0.0.1:0",
+            None,
+            token.clone(),
+            denials.clone(),
+            settings.clone(),
+            moments.clone(),
+        )
+        .unwrap();
         let addr = &bound.to_string();
 
         let body = r#"{"hook_event_name":"Stop","cwd":"/root/Projects/whence"}"#;
@@ -505,5 +635,22 @@ mod tests {
         assert!(resp.starts_with("HTTP/1.1 401"));
         let resp = raw_http(addr, &post("/hook/rotated", ""));
         assert!(resp.starts_with("HTTP/1.1 200"));
+
+        // The moment gate applies live too: with the gate off (defaults) a prompt
+        // recorded nothing; flip it on and the snippet lands in the moments map.
+        let prompt_body = r#"{"hook_event_name":"UserPromptSubmit","cwd":"/root/Projects/whence","prompt":"fix the parser"}"#;
+        let post_prompt = format!(
+            "POST /hook/rotated HTTP/1.1\r\nHost: whence\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{prompt_body}",
+            prompt_body.len()
+        );
+        let resp = raw_http(addr, &post_prompt);
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        assert!(crate::context::moment_for(&moments, "whence").is_none(), "gate off → no moment");
+        settings.lock().unwrap().context_hook_prompts = true;
+        let resp = raw_http(addr, &post_prompt);
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        let moment = crate::context::moment_for(&moments, "whence").expect("gate on → moment");
+        assert_eq!(moment.text, "fix the parser");
+        assert_eq!(moment.source, crate::context::ContextSource::HookPrompt);
     }
 }

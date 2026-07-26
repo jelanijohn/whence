@@ -295,6 +295,37 @@ pub(crate) fn slug_from_cwd(path: &Path) -> Option<String> {
     slugify(cwd_basename(&first_cwd(path)?)?)
 }
 
+/// How far into a transcript [`first_summary`] looks. Summary lines live at the
+/// head of resumed/compacted session files; bounding the scan keeps a
+/// summary-less (fresh) session from costing a full-file read on every
+/// `SessionStart` hook.
+const SUMMARY_SCAN_LINES: usize = 64;
+
+/// The transcript's session summary, if Claude Code wrote one — resumed and
+/// compacted sessions carry `{"type":"summary","summary":"…"}` lines at the top
+/// describing the thread being continued. Best-effort: first summary in the head
+/// window wins; a fresh session has none.
+pub(crate) fn first_summary(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    for line in BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .take(SUMMARY_SCAN_LINES)
+    {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if val.get("type").and_then(|t| t.as_str()) == Some("summary") {
+            if let Some(s) = val.get("summary").and_then(|s| s.as_str()) {
+                if !s.trim().is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Read a transcript's launch directory from its **first** `cwd` line — the
 /// project root, even if the session later `cd`s into a subdir. Its basename is
 /// the slug (run through the shared `slugify` so an fs-resolved slug converges
@@ -414,6 +445,25 @@ mod tests {
             context::root_for(&roots, "blapp-web"),
             Some(PathBuf::from("/root/Projects/blapp-web"))
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn first_summary_reads_head_summary_line_only() {
+        let dir = std::env::temp_dir().join("whence-cc-summary");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("resumed.jsonl");
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "{{\"type\":\"summary\",\"summary\":\"Fix HEAD parser fixtures\"}}").unwrap();
+        writeln!(f, "{{\"type\":\"user\",\"cwd\":\"/root/Projects/whence\"}}").unwrap();
+        assert_eq!(first_summary(&p).as_deref(), Some("Fix HEAD parser fixtures"));
+
+        // A fresh session (no summary line) and a missing file both yield None.
+        let fresh = dir.join("fresh.jsonl");
+        std::fs::write(&fresh, "{\"type\":\"user\",\"cwd\":\"/root/Projects/whence\"}\n").unwrap();
+        assert_eq!(first_summary(&fresh), None);
+        assert_eq!(first_summary(&dir.join("nope.jsonl")), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }

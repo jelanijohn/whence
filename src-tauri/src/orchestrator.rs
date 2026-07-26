@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::adapters::WorkEvent;
-use crate::context::{self, ContextString, SharedRoots, StoredContext};
+use crate::context::{self, ContextSource, ContextString, SharedMoments, SharedRoots, StoredContext};
 use crate::engine::segment::{Effect, FocusSnapshot, Segmenter};
 use crate::engine::timeline;
 use crate::neuroskill;
@@ -84,6 +84,11 @@ pub async fn run(
     data_dir: std::path::PathBuf,
     settings: Arc<Mutex<Settings>>,
     roots: SharedRoots,
+    // Per-project *moments* (docs/context-strings.md §10) — prompt snippets and
+    // conversation titles the capture-enabled receivers record. This loop only
+    // arbitrates (per-source gates in `focus_context`) and clears on block close;
+    // in-memory and display-only throughout (the A2 raw-capture posture).
+    moments: SharedMoments,
 ) {
     let mut seg = Segmenter::new(read_settings(&settings).segment_config());
     let timeline_path = timeline::timeline_path(&data_dir);
@@ -123,8 +128,10 @@ pub async fn run(
                     }
                 }
                 Effect::BlockClosed(block) => {
-                    // Stamp the closing block with the last resolved context for
-                    // its project (any age — recall beats freshness here, §5).
+                    // Stamp the closing block with the last resolved *git* context
+                    // for its project (any age — recall beats freshness here, §5).
+                    // Hook-derived moments are deliberately not stamped: display-
+                    // only, per the A2 raw-capture decision.
                     let record = TimelineRecord {
                         block: block.clone(),
                         context: closing_context(&cfg, &roots, &ctx_cache, &block.project),
@@ -132,6 +139,9 @@ pub async fn run(
                     if let Err(e) = timeline::append_block(&timeline_path, &record) {
                         eprintln!("whence: timeline append failed: {e}");
                     }
+                    // The moment described this block; a fresh block starts on the
+                    // git fallback until you prompt again.
+                    context::clear_moment(&moments, &block.project);
                     if cfg.neuroskill_enabled {
                         fire_label(&cfg, neuroskill::end_label(&block.project));
                     }
@@ -144,7 +154,7 @@ pub async fn run(
         // rides alongside, never delaying it — a cache miss emits without context
         // and the async resolve triggers the follow-up push above.
         let snap = seg.snapshot();
-        let ctx = focus_context(&cfg, &roots, &mut ctx_cache, &ctx_tx, &snap);
+        let ctx = focus_context(&cfg, &roots, &mut ctx_cache, &moments, &ctx_tx, &snap);
         let widget = WidgetSnapshot { snapshot: snap, context: ctx };
         if let Ok(mut guard) = shared.lock() {
             *guard = widget.clone();
@@ -163,15 +173,31 @@ fn read_settings(settings: &Arc<Mutex<Settings>>) -> Settings {
     settings.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
-/// The context string to attach to this snapshot emit: the cached value for the
-/// focused project's root (stale is fine — better a last-known line than a
-/// flash of nothing), kicking off an async re-resolve when the cache is missing
-/// or past TTL. Every `None` on the way — toggle off, no focus, rootless
-/// project — is silent degradation (spec §2.3), never an error.
+/// Is a moment from this source currently displayable? Each content-derived
+/// source is gated by its own live toggle (docs/context-strings.md §10) — turning
+/// one off hides its stored moments immediately, without touching the others.
+fn moment_source_enabled(cfg: &Settings, source: ContextSource) -> bool {
+    match source {
+        ContextSource::HookPrompt => cfg.context_hook_prompts,
+        ContextSource::BrowserTitle => cfg.context_browser_titles,
+        // Git never lands in the moments map (it's the per-root fallback tier);
+        // defensively inert if it ever did.
+        ContextSource::Git => false,
+    }
+}
+
+/// The context string to attach to this snapshot emit, on the §10 priority
+/// ladder: the live *moment* (your prompt snippet / session summary / the
+/// conversation title — whichever a receiver recorded last) first, then the
+/// per-root git fallback — the cached value (stale is fine — better a last-known
+/// line than a flash of nothing), kicking off an async re-resolve when the cache
+/// is missing or past TTL. Every `None` on the way — toggle off, no focus,
+/// rootless project — is silent degradation (spec §2.3), never an error.
 fn focus_context(
     cfg: &Settings,
     roots: &SharedRoots,
     cache: &mut context::ContextCache,
+    moments: &SharedMoments,
     ctx_tx: &UnboundedSender<ResolvedContext>,
     snap: &FocusSnapshot,
 ) -> Option<ContextString> {
@@ -179,6 +205,12 @@ fn focus_context(
         return None;
     }
     let slug = snap.projects.iter().find(|p| p.active).map(|p| p.project.as_str())?;
+    // A moment needs no root — a prompt or title gives context even where git can't.
+    if let Some(moment) = context::moment_for(moments, slug) {
+        if moment_source_enabled(cfg, moment.source) {
+            return Some(moment);
+        }
+    }
     let root = context::root_for(roots, slug)?;
     let now = now_secs();
     let (cached, needs_resolve) = match cache.get(&root) {
@@ -297,5 +329,106 @@ mod tests {
         let snap: WidgetSnapshot = serde_json::from_str(json).unwrap();
         assert!(snap.context.is_none());
         assert!(snap.snapshot.projects.is_empty());
+    }
+
+    // --- Moments (docs/context-strings.md §10) ---------------------------------
+
+    /// A snapshot with `slug` as the single, active project.
+    fn active_snap(slug: &str) -> FocusSnapshot {
+        use crate::engine::segment::{ProjectSnapshot, Status};
+        FocusSnapshot {
+            projects: vec![ProjectSnapshot {
+                project: slug.to_string(),
+                status: Status::Active,
+                status_since: Some(0),
+                active: true,
+                presence: None,
+                sources: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn moment_outranks_git_and_needs_no_root() {
+        let mut cfg = Settings::default();
+        cfg.context_hook_prompts = true;
+        let roots = context::new_roots(); // deliberately empty: no git root at all
+        let mut cache = context::ContextCache::new();
+        let moments = context::new_moments();
+        context::record_moment(&moments, "whence", "fix parser", ContextSource::HookPrompt, 10);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // §10 ladder: the per-moment string wins — even for a rootless project.
+        let ctx =
+            focus_context(&cfg, &roots, &mut cache, &moments, &tx, &active_snap("whence"));
+        assert_eq!(ctx.as_ref().map(|c| c.text.as_str()), Some("fix parser"));
+        assert_eq!(ctx.unwrap().source, ContextSource::HookPrompt);
+
+        // Source gate off → the stored moment is not shown (git fallback, here none).
+        cfg.context_hook_prompts = false;
+        let ctx =
+            focus_context(&cfg, &roots, &mut cache, &moments, &tx, &active_snap("whence"));
+        assert!(ctx.is_none());
+
+        // Master toggle off → nothing, regardless of the source gate.
+        cfg.context_strings = false;
+        cfg.context_hook_prompts = true;
+        let ctx =
+            focus_context(&cfg, &roots, &mut cache, &moments, &tx, &active_snap("whence"));
+        assert!(ctx.is_none());
+    }
+
+    #[test]
+    fn moment_source_gates_are_independent() {
+        // A browser-title moment obeys the title gate, not the prompt gate: with
+        // titles on and prompts off, a BrowserTitle moment shows; flip the gates
+        // and the same moment hides.
+        let mut cfg = Settings::default();
+        cfg.context_browser_titles = true;
+        cfg.context_hook_prompts = false;
+        let roots = context::new_roots();
+        let mut cache = context::ContextCache::new();
+        let moments = context::new_moments();
+        context::record_moment(
+            &moments,
+            "whence",
+            "Debugging the HEAD parser",
+            ContextSource::BrowserTitle,
+            10,
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let ctx =
+            focus_context(&cfg, &roots, &mut cache, &moments, &tx, &active_snap("whence"));
+        assert_eq!(ctx.unwrap().source, ContextSource::BrowserTitle);
+
+        cfg.context_browser_titles = false;
+        cfg.context_hook_prompts = true;
+        let ctx =
+            focus_context(&cfg, &roots, &mut cache, &moments, &tx, &active_snap("whence"));
+        assert!(ctx.is_none(), "the title gate governs a title moment");
+    }
+
+    #[test]
+    fn moments_are_display_only_never_stamped() {
+        // The A2 raw-capture decision: a content-derived moment shows live but the
+        // block stamp comes from git alone — `closing_context` doesn't even see
+        // the moments map, and with no git root the stamp is simply absent.
+        let mut cfg = Settings::default();
+        cfg.context_hook_prompts = true;
+        cfg.context_browser_titles = true;
+        let roots = context::new_roots();
+        let mut cache = context::ContextCache::new();
+        let moments = context::new_moments();
+        context::record_moment(&moments, "whence", "secret prompt", ContextSource::HookPrompt, 10);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let shown =
+            focus_context(&cfg, &roots, &mut cache, &moments, &tx, &active_snap("whence"));
+        assert!(shown.is_some(), "the moment displays live");
+        assert!(
+            closing_context(&cfg, &roots, &cache, "whence").is_none(),
+            "but nothing content-derived may reach the persisted block"
+        );
     }
 }

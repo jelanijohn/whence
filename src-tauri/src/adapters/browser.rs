@@ -114,6 +114,13 @@ pub struct BrowserPayload {
     /// (you sent a turn); see [`event_for`].
     #[serde(default)]
     pub turn_count: Option<u32>,
+    /// The conversation's title (opt-in BrowserTitle context source; extension
+    /// README "Conversation titles"). Content-derived: the extension only sends it
+    /// when the `/raise` poll advertised `capture_titles`, and [`serve`] drops it
+    /// again unless the setting is on. Never an attribution input — it feeds only
+    /// the display-only context moment.
+    #[serde(default)]
+    pub conversation_title: Option<String>,
 }
 
 /// The §3 resolution outcome for one payload.
@@ -371,6 +378,42 @@ fn handle(
     }
 }
 
+/// The live browser-title context gate: master toggle AND the opt-in source
+/// toggle (docs/context-strings.md §10). Poison falls back to off — never capture
+/// on a broken lock.
+fn titles_enabled(settings: &Arc<Mutex<crate::settings::Settings>>) -> bool {
+    settings
+        .lock()
+        .map(|s| s.context_strings && s.context_browser_titles)
+        .unwrap_or(false)
+}
+
+/// Record an attributed conversation's title as its project's live context moment
+/// (source `BrowserTitle`), sanitized and capped like every context string. No
+/// title (or one that sanitizes to nothing) records nothing — the previous moment,
+/// from any source, stands.
+fn record_title_moment(
+    moments: &crate::context::SharedMoments,
+    ev: &WorkEvent,
+    p: &BrowserPayload,
+) {
+    let (Some(slug), Some(title), Some(ts)) =
+        (ev.project.as_deref(), p.conversation_title.as_deref(), ev.ts_secs())
+    else {
+        return;
+    };
+    let text = crate::context::sanitize(title);
+    if !text.is_empty() {
+        crate::context::record_moment(
+            moments,
+            slug,
+            &text,
+            crate::context::ContextSource::BrowserTitle,
+            ts,
+        );
+    }
+}
+
 /// Bind the loopback browser-receiver endpoint and serve forever on a dedicated
 /// thread, emitting `WorkEvent`s on `tx`. Returns once the socket is bound (an error
 /// means the bind failed — e.g. the port is taken); the serving loop then runs for
@@ -387,6 +430,13 @@ fn handle(
 ///
 /// The thread owns the mutable [`MappingStore`] (single-threaded, so no lock) and the
 /// per-conversation turn-count memory.
+///
+/// `settings` is the live shared handle, read per request for the browser-title
+/// context gate (`context_strings && context_browser_titles`): it rides the
+/// `/raise` response as `capture_titles` (telling the extension whether to send
+/// titles at all) and gates title retention here in depth. `moments` is where an
+/// attributed conversation's sanitized title is recorded (docs/context-strings.md
+/// §10) — display-only, never an attribution input.
 pub fn serve(
     tx: UnboundedSender<WorkEvent>,
     mut store: MappingStore,
@@ -394,6 +444,8 @@ pub fn serve(
     raise_q: RaiseQueue,
     token: crate::auth::SharedToken,
     denials: crate::auth::Denials,
+    settings: Arc<Mutex<crate::settings::Settings>>,
+    moments: crate::context::SharedMoments,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind browser receiver on {addr}: {e}"))?;
@@ -422,7 +474,13 @@ pub fn serve(
                         .lock()
                         .map(|mut q| q.drain(..).collect())
                         .unwrap_or_default();
-                    let body = serde_json::json!({ "raise": urls }).to_string();
+                    // Piggyback the title-capture setting so the extension gates at
+                    // the source — one widget toggle, no second options-page knob.
+                    let body = serde_json::json!({
+                        "raise": urls,
+                        "capture_titles": titles_enabled(&settings),
+                    })
+                    .to_string();
                     let hdr = tiny_http::Header::from_bytes(
                         &b"Content-Type"[..],
                         &b"application/json"[..],
@@ -437,6 +495,13 @@ pub fn serve(
                     if let Ok(payload) = serde_json::from_str::<BrowserPayload>(&body) {
                         let now = chrono::Utc::now().to_rfc3339();
                         if let Some(ev) = handle(&payload, &mut store, &mut last_turn, &now) {
+                            // Attributed conversation + gate on → its sanitized title
+                            // becomes the project's live context moment. Depth gate:
+                            // even a title that slipped past the extension's own gate
+                            // is dropped here when the setting is off.
+                            if titles_enabled(&settings) {
+                                record_title_moment(&moments, &ev, &payload);
+                            }
                             // Unbounded send never blocks; an error only means the core
                             // task is gone (shutdown), so dropping is correct.
                             let _ = tx.send(ev);
@@ -756,5 +821,30 @@ urls                  = ["https://claude.ai/project/proj_abc"]
         let p: BrowserPayload = serde_json::from_str(json).unwrap();
         assert_eq!(p.url.as_deref(), Some("https://claude.ai/new"));
         assert_eq!(p.streaming, Some(true));
+    }
+
+    #[test]
+    fn title_moment_records_sanitized_for_attributed_events() {
+        let moments = crate::context::new_moments();
+        let mut p = payload();
+        p.url = Some("https://claude.ai/project/x".into());
+        p.conversation_title = Some("  Debugging the\nHEAD parser  ".into());
+        let ev = event_for("whence".into(), &p, None, NOW);
+        record_title_moment(&moments, &ev, &p);
+        let m = crate::context::moment_for(&moments, "whence").unwrap();
+        assert_eq!(m.text, "Debugging the HEAD parser"); // sanitized single line
+        assert_eq!(m.source, crate::context::ContextSource::BrowserTitle);
+
+        // No title (or one that sanitizes to nothing) records nothing — the
+        // previous moment stands rather than being blanked.
+        let mut none = payload();
+        none.url = Some("https://claude.ai/project/x".into());
+        record_title_moment(&moments, &event_for("whence".into(), &none, None, NOW), &none);
+        none.conversation_title = Some(" \u{7} ".into());
+        record_title_moment(&moments, &event_for("whence".into(), &none, None, NOW), &none);
+        assert_eq!(
+            crate::context::moment_for(&moments, "whence").unwrap().text,
+            "Debugging the HEAD parser"
+        );
     }
 }

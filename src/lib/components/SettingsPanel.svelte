@@ -32,6 +32,8 @@
     terminalEnabled: boolean;
     browserEnabled: boolean;
     contextStrings: boolean;
+    contextHookPrompts: boolean;
+    contextBrowserTitles: boolean;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
     corroboratorConfidenceCutoff: number;
@@ -78,6 +80,8 @@
       terminalEnabled: s.terminalEnabled,
       browserEnabled: s.browserEnabled,
       contextStrings: s.contextStrings,
+      contextHookPrompts: s.contextHookPrompts,
+      contextBrowserTitles: s.contextBrowserTitles,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -118,6 +122,8 @@
       terminalEnabled: d.terminalEnabled,
       browserEnabled: d.browserEnabled,
       contextStrings: d.contextStrings,
+      contextHookPrompts: d.contextHookPrompts,
+      contextBrowserTitles: d.contextBrowserTitles,
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
@@ -146,6 +152,8 @@
       terminalEnabled: s.terminalEnabled,
       browserEnabled: s.browserEnabled,
       contextStrings: s.contextStrings,
+      contextHookPrompts: s.contextHookPrompts,
+      contextBrowserTitles: s.contextBrowserTitles,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -377,6 +385,27 @@
         Shows the focused project's git branch · last commit beside the attribution,
         and stamps it onto past blocks. Display-only — never part of a NeuroSkill label.
       </p>
+      {#if draft.contextStrings}
+        <div class="flex items-center justify-between">
+          <span style="color: var(--fg-body); font-size: 13px;">Prompt snippets</span>
+          <Toggle bind:checked={draft.contextHookPrompts} label="Prompt snippets" />
+        </div>
+        <p style="color: var(--fg3); font-size: 11px;">
+          Also shows your last prompt (or the session summary) from the Claude Code
+          hooks, in preference to git while its block is open. Content-derived, so
+          opt-in — and never written to the timeline; only git is stamped on blocks.
+        </p>
+        <div class="flex items-center justify-between">
+          <span style="color: var(--fg-body); font-size: 13px;">Conversation titles</span>
+          <Toggle bind:checked={draft.contextBrowserTitles} label="Conversation titles" />
+        </div>
+        <p style="color: var(--fg3); font-size: 11px;">
+          Also shows the focused browser conversation's title (needs the browser
+          adapter + extension). Providers title chats from their content, so opt-in —
+          the extension only sends titles while this is on, and they're never written
+          to the timeline.
+        </p>
+      {/if}
     </div>
 
     <!-- Segmenter -->

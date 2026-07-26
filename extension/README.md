@@ -18,10 +18,31 @@ a chat under — plus transient status:
 | `provider_project_id` / `…_name` | prompt or response **content** |
 | turn **count** (not content) | clipboard, form values, keystrokes |
 | `streaming` / `input_detected` booleans | non-provider pages |
+| `conversation_title` — **opt-in, default off** (see below) | |
 
 Attribution never derives from which window is foregrounded — reading the project
 marker is the same category as reading a repo marker, not the surveillance category
 §2 rejects.
+
+### Conversation titles (opt-in scope extension)
+
+With **Settings → Context → Conversation titles** enabled in Whence, the sensor also
+sends the conversation's **title** (one `document.title` read, provider suffix
+stripped) so the widget can show *what* the focused chat is about
+(`docs/context-strings.md` §10, `BrowserTitle`). Because providers auto-title chats
+from their content, this is **content-derived** and therefore off by default and
+double-gated:
+
+- The daemon advertises the setting on the `/raise` poll response
+  (`capture_titles`); the service worker **strips the title from every observation
+  unless that flag is on** — nothing title-shaped leaves the browser while the
+  setting is off (worker restarts default back to off until the next poll).
+- The receiver drops titles again unless the setting is on (defense in depth), and
+  what it keeps is **display-only**: shown beside the live focus, never written to
+  the timeline or any NeuroSkill label.
+
+Attribution is entirely unaffected — the title never feeds a mapping, mint, or
+focus decision.
 
 ## Raising a tab (the back-channel)
 

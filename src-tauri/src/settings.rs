@@ -109,6 +109,24 @@ pub struct Settings {
     /// no UI; calibrate by feel.
     #[serde(default = "default_context_ttl")]
     pub context_ttl_seconds: u64,
+    /// Also derive context from Claude Code hooks: your prompt snippet
+    /// (`UserPromptSubmit`) and the session summary (`SessionStart`), shown in
+    /// preference to git while the block they describe is open. **Opt-in, default
+    /// off** — this is content-derived text, unlike the user-authored git tier
+    /// (docs/context-strings.md §10). Display-only either way: hook-derived
+    /// strings are never stamped onto timeline blocks. Off = the hooks receiver
+    /// doesn't even retain the prompt text.
+    #[serde(default)]
+    pub context_hook_prompts: bool,
+    /// Also derive context from the browser extension: the focused conversation's
+    /// title, shown in preference to git while its project is focused. **Opt-in,
+    /// default off** — providers auto-title chats from their content, so this is
+    /// content-derived (docs/context-strings.md §10). Double-gated: the extension
+    /// is told the setting on its `/raise` poll and strips titles at the source
+    /// when off; the receiver drops them again in depth. Display-only either way —
+    /// titles are never stamped onto timeline blocks.
+    #[serde(default)]
+    pub context_browser_titles: bool,
     /// Sustained seconds before a focus switch is confirmed.
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
@@ -185,6 +203,8 @@ impl Default for Settings {
             browser_listen_addr_override: None,
             context_strings: true,
             context_ttl_seconds: 60,
+            context_hook_prompts: false,
+            context_browser_titles: false,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
             corroborator_confidence_cutoff: 0.6,

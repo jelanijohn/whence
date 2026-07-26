@@ -36,12 +36,24 @@ const MAX_CHARS: usize = 120;
 /// this we ship branch-only rather than stall (spec §4 / open item 1).
 const SUBJECT_TIMEOUT_SECS: u64 = 2;
 
-/// Where a context string came from. One variant today; future content-derived
-/// sources (spec §10) each arrive behind their own opt-in gate.
+/// Where a context string came from. Future content-derived sources (spec §10)
+/// each arrive behind their own opt-in gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextSource {
     Git,
+    /// A per-moment string from the Claude Code hooks: your `UserPromptSubmit`
+    /// prompt snippet, or the transcript's session summary on `SessionStart`.
+    /// Content-derived → opt-in (`context_hook_prompts`, default off) and
+    /// **display-only**: it is never stamped onto timeline blocks (the A2
+    /// raw-capture posture — prompt-derived text stays off disk).
+    HookPrompt,
+    /// A per-moment string from the browser extension: the conversation's title
+    /// (providers auto-title chats from their content → content-derived). Opt-in
+    /// (`context_browser_titles`, default off), double-gated — the extension only
+    /// sends titles when the `/raise` poll advertises the setting — and
+    /// **display-only**, like every content-derived source.
+    BrowserTitle,
 }
 
 /// A resolved, display-ready context string for the focused project. Attached to
@@ -92,6 +104,49 @@ pub fn record_root(roots: &SharedRoots, slug: &str, root: PathBuf) {
 
 pub fn root_for(roots: &SharedRoots, slug: &str) -> Option<PathBuf> {
     roots.lock().ok()?.get(slug).cloned()
+}
+
+// --- Moments (per-moment context, spec §10) -----------------------------------
+
+/// Slug → the freshest *per-moment* context string: your last prompt snippet or
+/// session summary (hooks receiver), the live conversation title (browser
+/// receiver). **Receivers record; the orchestrator arbitrates and clears.**
+/// Last-writer-wins across sources — the §10 ladder puts every per-moment string
+/// above the per-root git fallback, and the newest one describes *now*. All
+/// content-derived, so all in-memory and display-only: nothing here is ever
+/// stamped onto a persisted block. The orchestrator clears a slug's moment when
+/// its block closes (a moment describes the block it arrived in).
+pub type SharedMoments = Arc<Mutex<HashMap<String, ContextString>>>;
+
+pub fn new_moments() -> SharedMoments {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Record (or supersede) a slug's live moment. Poison-tolerant, like the roots
+/// registry — a display nicety must never panic a receiver thread.
+pub fn record_moment(
+    moments: &SharedMoments,
+    slug: &str,
+    text: &str,
+    source: ContextSource,
+    observed_at: i64,
+) {
+    if let Ok(mut g) = moments.lock() {
+        g.insert(
+            slug.to_string(),
+            ContextString { text: text.to_string(), source, observed_at },
+        );
+    }
+}
+
+pub fn moment_for(moments: &SharedMoments, slug: &str) -> Option<ContextString> {
+    moments.lock().ok()?.get(slug).cloned()
+}
+
+pub fn clear_moment(moments: &SharedMoments, slug: &str) {
+    if let Ok(mut g) = moments.lock() {
+        g.remove(slug);
+    }
 }
 
 // --- Per-root cache -----------------------------------------------------------

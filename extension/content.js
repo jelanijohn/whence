@@ -109,6 +109,22 @@
       turn_count = undefined;
     }
 
+    // Conversation title — the one extra DOM read of the opt-in BrowserTitle
+    // context source (README "Conversation titles"). Read here, but the BACKGROUND
+    // worker strips it from the observation unless Whence said titles are on (the
+    // /raise-carried `capture_titles` flag), so nothing title-shaped leaves the
+    // browser while the setting is off. Generic untitled forms count as no title.
+    let conversation_title = null;
+    try {
+      let t = (document.title || "").trim();
+      if (cfg.titleStrip) t = t.replace(cfg.titleStrip, "").trim();
+      if (t && !(cfg.titleBare && cfg.titleBare.test(t))) {
+        conversation_title = t.slice(0, 300); // daemon re-caps at the display bound
+      }
+    } catch {
+      conversation_title = null;
+    }
+
     return {
       url,
       provider: cfg.provider,
@@ -118,6 +134,7 @@
       streaming,
       input_detected,
       turn_count,
+      conversation_title,
     };
   }
 

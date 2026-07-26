@@ -70,6 +70,10 @@ pub fn run() {
             // (from the cwd it already reads), read by the orchestrator to resolve
             // context strings. Display-only plumbing (docs/context-strings.md).
             let roots: context::SharedRoots = context::new_roots();
+            // Slug → live context moment (prompt snippet / conversation title):
+            // capture-enabled receivers record, the orchestrator arbitrates and
+            // clears. In-memory, display-only (docs/context-strings.md §10).
+            let moments: context::SharedMoments = context::new_moments();
             let neuroskill_status: neuroskill::health::SharedStatus =
                 Arc::new(Mutex::new(neuroskill::health::NeuroskillStatus::default()));
 
@@ -101,10 +105,13 @@ pub fn run() {
                 auth_denials: auth_denials.clone(),
             });
 
-            // The core task reads settings through the shared handle too, so the
-            // NeuroSkill and context-string toggles apply without a restart (the
-            // segmenter's tunables are still read once, at startup).
+            // The core task and the hooks receiver read settings through the
+            // shared handle too, so the NeuroSkill and context-string toggles
+            // apply without a restart (the segmenter's tunables are still read
+            // once, at startup).
             let settings_for_core = settings_state.clone();
+            let settings_for_hooks = settings_state.clone();
+            let settings_for_browser = settings_state.clone();
 
             // NeuroSkill connection health: an independent probe loop that keeps the
             // widget's connection indicator honest. Reads settings each tick, so it
@@ -142,6 +149,8 @@ pub fn run() {
                     transcripts_root,
                     receiver_token.clone(),
                     auth_denials.clone(),
+                    settings_for_hooks,
+                    moments.clone(),
                 ) {
                     eprintln!("whence: hook receiver not started: {e}");
                 }
@@ -186,6 +195,8 @@ pub fn run() {
                                 raise_queue.clone(),
                                 receiver_token.clone(),
                                 auth_denials.clone(),
+                                settings_for_browser,
+                                moments.clone(),
                             ) {
                                 eprintln!("whence: browser receiver not started: {e}");
                             }
@@ -212,7 +223,8 @@ pub fn run() {
                         None
                     }
                 };
-                orchestrator::run(handle, rx, shared, data_dir, settings_for_core, roots).await;
+                orchestrator::run(handle, rx, shared, data_dir, settings_for_core, roots, moments)
+                    .await;
             });
 
             Ok(())

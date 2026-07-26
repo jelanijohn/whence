@@ -75,7 +75,15 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
   `neuroskill/`, and the NeuroSkill label stays byte-identical. Roots come from a
   slug→root side table the transcript watcher fills from the `cwd` it already
   reads. Toggle: `context_strings` (default on); TTL: `context_ttl_seconds`
-  (file-only knob).
+  (file-only knob). Content-derived *moment* sources (each opt-in, default off,
+  **display-only** — never stamped onto timeline blocks, A2 raw-capture posture,
+  pinned by test): **`HookPrompt`** (`context_hook_prompts`) — your prompt snippet
+  (`UserPromptSubmit`) / session summary (`SessionStart`) via the hooks receiver —
+  and **`BrowserTitle`** (`context_browser_titles`) — the conversation's title via
+  the extension, double-gated (the `/raise` poll carries `capture_titles`, so the
+  extension strips titles at the source when off). Receivers record into
+  `context::SharedMoments`; the orchestrator arbitrates (freshest moment beats
+  git, per-source gates) and clears a slug's moment at block close.
 * **`src-tauri/src/orchestrator.rs`** — wires adapters → segmenter → outputs. The
   *only* place allowed to be impure around the engine.
 * **`src/`** — the SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4). Reuses
