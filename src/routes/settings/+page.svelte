@@ -19,8 +19,10 @@
 </script>
 
 <!-- app.css paints html/body transparent for the borderless widget; this
-     decorated window needs an opaque themed backdrop. -->
-<div class="settings-window select-none">
+     decorated window needs an opaque themed backdrop. select-text overrides the
+     body's inherited user-select:none — the panel shows copyable values (the
+     receiver token, file paths, the terminal snippet). -->
+<div class="settings-window select-text">
   <SettingsPanel />
 </div>
 
