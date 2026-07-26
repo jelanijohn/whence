@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ProjectSnapshot, SourceSnapshot } from "$lib/types";
+  import type { ContextString, ProjectSnapshot, SourceSnapshot } from "$lib/types";
   import BrandMark from "./BrandMark.svelte";
   import StatusDot from "./StatusDot.svelte";
   import BlockTimer from "./BlockTimer.svelte";
@@ -11,11 +11,15 @@
   // what else is running or waiting on you. Expanding reveals the project's live sources.
   let {
     project,
+    context = null,
     expanded,
     onToggle,
     onActivate,
   }: {
     project: ProjectSnapshot;
+    // The focused project's context string (git branch · commit) — set only on the
+    // active row; absent = no line, no reserved height (docs/context-strings.md §6).
+    context?: ContextString | null;
     expanded: boolean;
     onToggle: () => void;
     // Fired when a (browser) source row is clicked: raise its tab + focus the project.
@@ -71,6 +75,20 @@
       {/if}
     </span>
   </div>
+
+  <!-- Context string (docs/context-strings.md §6): a muted secondary line under the
+       project name — what you were doing there, to jog memory. Indented to align
+       with the name (12px pad + 16px glyph + 8px gap). Display-only; absent when
+       nothing resolved. -->
+  {#if context}
+    <div
+      class="truncate"
+      style="padding: 0 12px 2px 36px; color: var(--fg3); font-size: 11px; line-height: 14px;"
+      title={context.text}
+    >
+      {context.text}
+    </div>
+  {/if}
 
   {#if expanded}
     {#each project.sources as source (source.source ?? source.label)}

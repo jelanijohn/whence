@@ -12,8 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::adapters::browser::RaiseQueue;
 use crate::adapters::{Surface, WorkEvent, WorkKind};
-use crate::orchestrator::SharedSnapshot;
-use crate::engine::segment::{FocusBlock, FocusSnapshot};
+use crate::orchestrator::{SharedSnapshot, TimelineRecord, WidgetSnapshot};
 use crate::engine::timeline;
 use crate::neuroskill::health::{NeuroskillStatus, SharedStatus};
 use crate::settings::{self, Settings};
@@ -35,19 +34,24 @@ pub struct AppState {
     /// The live receiver bearer token — shared with the three listener threads, so a
     /// rotation here applies to them without a restart.
     pub receiver_token: crate::auth::SharedToken,
+    /// Live context moments — held here so disabling a moment source in Settings
+    /// purges its already-captured text immediately (not just hides it until the
+    /// block closes).
+    pub moments: crate::context::SharedMoments,
     /// Denied (401) receiver requests since launch — the Settings diagnostic.
     pub auth_denials: crate::auth::Denials,
 }
 
-/// Current focus snapshot — every live session (each with its own status + timer).
-/// A poisoned lock falls back to "no sessions" (idle) rather than panicking.
+/// Current focus snapshot — every live session (each with its own status + timer),
+/// plus the focused project's context string when one has resolved. A poisoned
+/// lock falls back to "no sessions" (idle) rather than panicking.
 #[tauri::command]
-pub fn get_focus_state(state: State<AppState>) -> FocusSnapshot {
+pub fn get_focus_state(state: State<AppState>) -> WidgetSnapshot {
     state
         .snapshot
         .lock()
         .map(|g| g.clone())
-        .unwrap_or(FocusSnapshot { projects: Vec::new() })
+        .unwrap_or_default()
 }
 
 /// Manually raise a browser tab and pull its project into focus. The frontend only
@@ -78,9 +82,10 @@ pub fn focus_source(state: State<AppState>, project: String, source: String) -> 
     state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
 }
 
-/// Today's closed focus blocks, oldest first — drives the expanded timeline.
+/// Today's closed focus blocks, oldest first — drives the expanded timeline. Each
+/// carries its stored context stamp, if the block closed with one.
 #[tauri::command]
-pub fn get_today_blocks(state: State<AppState>) -> Result<Vec<FocusBlock>, String> {
+pub fn get_today_blocks(state: State<AppState>) -> Result<Vec<TimelineRecord>, String> {
     let path = timeline::timeline_path(&state.data_dir);
     timeline::read_day(&path, chrono::Utc::now().timestamp())
         .map_err(|e| format!("could not read timeline: {e}"))
@@ -157,13 +162,15 @@ pub fn set_settings(
     state: State<AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
-    // Reconcile autostart with the OS only when it actually changed, so we don't
-    // re-register on every settings save.
-    let prev_autostart = state
+    let prev = state
         .settings
         .lock()
-        .map(|g| g.autostart)
-        .unwrap_or(false);
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    // Reconcile autostart with the OS only when it actually changed, so we don't
+    // re-register on every settings save.
+    let prev_autostart = prev.autostart;
     if settings.autostart != prev_autostart {
         let mgr = app.autolaunch();
         let res = if settings.autostart {
@@ -178,6 +185,28 @@ pub fn set_settings(
         .map_err(|e| format!("could not save settings: {e}"))?;
     if let Ok(mut g) = state.settings.lock() {
         *g = settings.clone();
+    }
+
+    // A moment source whose effective gate (the same conjunction the receivers
+    // capture under) just turned off gets its stored text dropped now — an
+    // opt-in privacy gate must release captured content on disable, not retain
+    // it hidden until the block closes.
+    let gates = [
+        (
+            crate::context::ContextSource::HookPrompt,
+            prev.context_strings && prev.context_hook_prompts,
+            settings.context_strings && settings.context_hook_prompts,
+        ),
+        (
+            crate::context::ContextSource::BrowserTitle,
+            prev.context_strings && prev.context_browser_titles,
+            settings.context_strings && settings.context_browser_titles,
+        ),
+    ];
+    for (source, was_on, is_on) in gates {
+        if was_on && !is_on {
+            crate::context::purge_source(&state.moments, source);
+        }
     }
 
     // Apply the window flags to the live `main` window. Idempotent, so no

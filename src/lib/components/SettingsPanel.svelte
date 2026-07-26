@@ -31,6 +31,9 @@
     ollamaEndpoint: string;
     terminalEnabled: boolean;
     browserEnabled: boolean;
+    contextStrings: boolean;
+    contextHookPrompts: boolean;
+    contextBrowserTitles: boolean;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
     corroboratorConfidenceCutoff: number;
@@ -76,6 +79,9 @@
       ollamaEndpoint: s.ollamaEndpoint ?? "",
       terminalEnabled: s.terminalEnabled,
       browserEnabled: s.browserEnabled,
+      contextStrings: s.contextStrings,
+      contextHookPrompts: s.contextHookPrompts,
+      contextBrowserTitles: s.contextBrowserTitles,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -115,6 +121,9 @@
       ollamaEndpoint: d.ollamaEndpoint.trim() || null,
       terminalEnabled: d.terminalEnabled,
       browserEnabled: d.browserEnabled,
+      contextStrings: d.contextStrings,
+      contextHookPrompts: d.contextHookPrompts,
+      contextBrowserTitles: d.contextBrowserTitles,
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
@@ -142,6 +151,9 @@
       ollamaEndpoint: s.ollamaEndpoint ?? null,
       terminalEnabled: s.terminalEnabled,
       browserEnabled: s.browserEnabled,
+      contextStrings: s.contextStrings,
+      contextHookPrompts: s.contextHookPrompts,
+      contextBrowserTitles: s.contextBrowserTitles,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -359,6 +371,41 @@
           >
         </span>
       </div>
+    </div>
+
+    <!-- Context strings — display-only recall (docs/context-strings.md). Applies
+         live on Save (the orchestrator reads the shared settings each wake). -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Context</p>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Context strings</span>
+        <Toggle bind:checked={draft.contextStrings} label="Context strings" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Shows the focused project's git branch · last commit beside the attribution,
+        and stamps it onto past blocks. Display-only — never part of a NeuroSkill label.
+      </p>
+      {#if draft.contextStrings}
+        <div class="flex items-center justify-between">
+          <span style="color: var(--fg-body); font-size: 13px;">Prompt snippets</span>
+          <Toggle bind:checked={draft.contextHookPrompts} label="Prompt snippets" />
+        </div>
+        <p style="color: var(--fg3); font-size: 11px;">
+          Also shows your last prompt (or the session summary) from the Claude Code
+          hooks, in preference to git while its block is open. Content-derived, so
+          opt-in — and never written to the timeline; only git is stamped on blocks.
+        </p>
+        <div class="flex items-center justify-between">
+          <span style="color: var(--fg-body); font-size: 13px;">Conversation titles</span>
+          <Toggle bind:checked={draft.contextBrowserTitles} label="Conversation titles" />
+        </div>
+        <p style="color: var(--fg3); font-size: 11px;">
+          Also shows the focused browser conversation's title (needs the browser
+          adapter + extension). Providers title chats from their content, so opt-in —
+          the extension only sends titles while this is on, and they're never written
+          to the timeline.
+        </p>
+      {/if}
     </div>
 
     <!-- Segmenter -->

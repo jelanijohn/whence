@@ -50,13 +50,38 @@ export type NeuroskillStatus =
   | "unreachable"
   | "unknown";
 
-// A closed focus block, as persisted to the JSONL timeline.
+// Where a context string came from (docs/context-strings.md §10). git = branch ·
+// commit subject (user-authored, default on); hook_prompt = your prompt snippet /
+// session summary via the Claude Code hooks; browser_title = the conversation's
+// title via the extension. The content-derived sources are opt-in and display-
+// only: never stamped onto persisted blocks.
+export type ContextSource = "git" | "hook_prompt" | "browser_title";
+
+// A display-only context line for the focused project ("main · fix HEAD parser").
+// Mirrors `ContextString` in src-tauri/src/context.rs. Never an attribution
+// input, never part of a NeuroSkill label (docs/context-strings.md §2).
+export interface ContextString {
+  text: string; // sanitized, ≤ 120 chars
+  source: ContextSource;
+  observedAt: number; // unix seconds
+}
+
+// The context stamp persisted on a timeline block — text + source only.
+export interface StoredContext {
+  text: string;
+  source: ContextSource;
+}
+
+// A closed focus block, as persisted to the JSONL timeline. The wire shape is the
+// Rust `TimelineRecord` (engine `FocusBlock` + flattened context stamp) — blocks
+// closed before the feature, or with it off, simply lack `context`.
 export interface FocusBlock {
   project: string;
   start: number; // unix seconds
   end: number; // unix seconds
   eventCount: number;
   meanConfidence: number;
+  context?: StoredContext | null;
 }
 
 // One live source under a project row — a single Claude Code session, browser
@@ -83,8 +108,12 @@ export interface ProjectSnapshot {
 
 // The live snapshot the widget renders, pushed on the `whence://focus` event and
 // returned by the get_focus_state command. Empty `projects` = idle / nothing live.
+// The wire shape is the Rust `WidgetSnapshot` (engine snapshot + flattened
+// context); `context` is the focused project's context string, absent until one
+// resolves (docs/context-strings.md §4).
 export interface FocusSnapshot {
   projects: ProjectSnapshot[];
+  context?: ContextString | null;
 }
 
 // Receiver auth state — mirrors `ReceiverAuth` in src-tauri/src/commands.rs.
@@ -115,6 +144,10 @@ export interface Settings {
   terminalListenAddrOverride?: string | null; // override cwd receiver bind; null = default 127.0.0.1:18451
   browserEnabled: boolean; // receive browser LLM sessions from the first-party extension (originating-capable)
   browserListenAddrOverride?: string | null; // override browser receiver bind; null = default 127.0.0.1:18452
+  contextStrings: boolean; // show git branch · commit beside the focus + stamp blocks; display-only, default true
+  contextTtlSeconds: number; // context re-resolve interval; settings-file-only knob (no UI)
+  contextHookPrompts: boolean; // also show prompt snippet / session summary from CC hooks; opt-in, display-only (never persisted)
+  contextBrowserTitles: boolean; // also show the browser conversation's title; opt-in, display-only (never persisted)
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block
   corroboratorConfidenceCutoff: number; // ≥ this = primary signal; below = weak hint (§7)

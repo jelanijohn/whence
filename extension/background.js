@@ -38,6 +38,14 @@ async function authHeaders(extra = {}) {
 // ~1.5s latency is imperceptible while staying gentle on the loopback.
 const POLL_MS = 1500;
 
+// Whether Whence wants conversation titles (the opt-in BrowserTitle context
+// source) — piggybacked on the /raise poll response (`capture_titles`), so the one
+// widget setting drives the sensor with no second options-page knob. Defaults off,
+// including across worker restarts, until the next poll says otherwise: while
+// false, `conversation_title` is stripped from every observation before it leaves
+// the browser (README "Conversation titles").
+let captureTitles = false;
+
 // The provider tabs we may raise — same hosts as the content-script matches. Used as
 // `chrome.tabs.query` match patterns; reading these tabs' URLs is authorized by the
 // extension's existing `host_permissions` (no broad `"tabs"` permission needed).
@@ -51,6 +59,10 @@ const PROVIDER_GLOBS = [
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== "whence:observation") return;
+  // The title-capture gate: unless Whence opted in, the title never leaves the
+  // browser. Shallow copy — the content script's payload is otherwise relayed as-is.
+  const payload = { ...msg.payload };
+  if (!captureTitles) delete payload.conversation_title;
   // Return `true` and call sendResponse so the message channel stays open until the
   // fetch settles — this keeps the MV3 service worker alive long enough to finish the
   // POST. Without it the worker can be terminated the instant this listener returns,
@@ -60,7 +72,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       fetch(WHENCE_ENDPOINT, {
         method: "POST",
         headers,
-        body: JSON.stringify(msg.payload),
+        body: JSON.stringify(payload),
         keepalive: true,
       }),
     )
@@ -123,7 +135,8 @@ async function pollOnce() {
   try {
     const r = await fetch(WHENCE_RAISE_ENDPOINT, { headers: await authHeaders() });
     if (!r.ok) return;
-    const { raise = [] } = await r.json();
+    const { raise = [], capture_titles = false } = await r.json();
+    captureTitles = !!capture_titles;
     for (const url of raise) await raiseTab(url);
   } catch (_) {
     // Whence not running / browser adapter off / port taken — ignore, retry next tick.

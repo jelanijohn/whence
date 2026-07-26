@@ -24,6 +24,9 @@
   const TITLE_H = 44;
   const ROW_H = 30;
   const SOURCE_ROW_H = 24;
+  // The focused row's context-string line (docs/context-strings.md §6) — only
+  // counted when one is present; no reserved height otherwise.
+  const CONTEXT_ROW_H = 16;
   const LIST_PAD = 12;
   const SECTION_H: Record<Exclude<View, "compact">, number> = {
     timeline: 168,
@@ -76,9 +79,18 @@
     }
   }
 
-  function windowHeight(v: View, rowCount: number, sourceCount: number): number {
+  function windowHeight(
+    v: View,
+    rowCount: number,
+    sourceCount: number,
+    contextRows: number,
+  ): number {
     const compact =
-      TITLE_H + Math.max(1, rowCount) * ROW_H + sourceCount * SOURCE_ROW_H + LIST_PAD;
+      TITLE_H +
+      Math.max(1, rowCount) * ROW_H +
+      sourceCount * SOURCE_ROW_H +
+      contextRows * CONTEXT_ROW_H +
+      LIST_PAD;
     return v === "compact" ? compact : compact + SECTION_H[v];
   }
 
@@ -108,7 +120,14 @@
 
   // Keep the window sized to the current view + live project rows + expanded sources.
   $effect(() => {
-    resize(windowHeight(view, projects.length, expandedSourceCount));
+    resize(
+      windowHeight(
+        view,
+        projects.length,
+        expandedSourceCount,
+        focus.snapshot.context ? 1 : 0,
+      ),
+    );
   });
 
   $effect(() => {
@@ -189,6 +208,7 @@
       {#each projects as project (project.project)}
         <ProjectRow
           {project}
+          context={project.active ? (focus.snapshot.context ?? null) : null}
           expanded={expanded.has(project.project)}
           onToggle={() => toggle(project.project)}
           onActivate={activateSource}

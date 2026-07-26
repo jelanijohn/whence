@@ -58,6 +58,12 @@ var WHENCE_PROVIDERS = [
     // blocks; assistant replies are wrapped in `.om-assistant-group`). A count
     // increment = a completed round = you acted.
     turnSelector: ".om-assistant-group",
+
+    // Conversation title (opt-in context source; README "Conversation titles"):
+    // document.title minus the provider suffix. `titleBare` names the generic
+    // untitled forms that count as "no title", not a title.
+    titleStrip: /\s*[-–—|·]\s*Claude(\s+Design)?\s*$/i,
+    titleBare: /^(Claude|Claude Design|New (chat|design))$/i,
   },
 
   {
@@ -89,6 +95,10 @@ var WHENCE_PROVIDERS = [
     // Turn counter: assistant message blocks. Count, don't read — the count is all
     // the daemon needs (a turn increment = you acted).
     turnSelector: '[data-testid="assistant-message"], div.font-claude-message',
+
+    // Conversation title (opt-in context source): document.title minus " - Claude".
+    titleStrip: /\s*[-–—|·]\s*Claude\s*$/i,
+    titleBare: /^(Claude|New chat)$/i,
   },
 
   {
@@ -109,5 +119,9 @@ var WHENCE_PROVIDERS = [
       'button[data-testid="stop-button"], button[aria-label*="Stop" i]',
 
     turnSelector: "[data-message-author-role]",
+
+    // Conversation title (opt-in context source): document.title minus " | ChatGPT".
+    titleStrip: /\s*[-–—|·]\s*ChatGPT\s*$/i,
+    titleBare: /^(ChatGPT|New chat)$/i,
   },
 ];

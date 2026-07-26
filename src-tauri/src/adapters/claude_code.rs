@@ -22,6 +22,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{slug_from_transcript_dir, slugify, Surface, WorkEvent, WorkKind};
+use crate::context::{self, SharedRoots};
 
 /// The user's home directory. `HOME` on Unix; Windows doesn't set it, so fall back
 /// to `USERPROFILE` — the assumption that Whence always runs under WSL2 (where
@@ -154,6 +155,7 @@ pub fn watch(
     tx: UnboundedSender<WorkEvent>,
     aliases: HashMap<String, String>,
     claude_dir_override: Option<&str>,
+    roots: SharedRoots,
 ) -> Result<Box<dyn Watcher + Send>, String> {
     let root = transcripts_root(claude_dir_override)
         .ok_or("could not resolve a home directory (HOME/USERPROFILE) for ~/.claude/projects")?;
@@ -173,7 +175,7 @@ pub fn watch(
             return;
         }
         for path in &event.paths {
-            if let Some(ev) = event_for_path(path, is_create, &aliases, &mut cache) {
+            if let Some(ev) = event_for_path(path, is_create, &aliases, &mut cache, &roots) {
                 // Unbounded send never blocks; an error only means the core task
                 // is gone (shutting down), so dropping the event is correct.
                 let _ = tx.send(ev);
@@ -210,12 +212,13 @@ fn event_for_path(
     is_create: bool,
     aliases: &HashMap<String, String>,
     cache: &mut HashMap<String, String>,
+    roots: &SharedRoots,
 ) -> Option<WorkEvent> {
     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
         return None;
     }
     let dir_name = path.parent()?.file_name()?.to_str()?;
-    let project = resolve_slug(dir_name, path, aliases, cache);
+    let project = resolve_slug(dir_name, path, aliases, cache, roots);
     Some(WorkEvent {
         ts: chrono::Utc::now().to_rfc3339(),
         surface: Surface::ClaudeCode,
@@ -238,58 +241,145 @@ fn event_for_path(
 
 /// Resolve the project slug for a transcript, preferring the most reliable signal:
 ///
-/// 1. **Alias override** (`dir_name` → slug) — the user's explicit last word.
-/// 2. **Cached cwd result** — a slug we already derived from this dir's `cwd`.
+/// 1. **Cached result** — a stable (alias/cwd) resolution we already made for this
+///    dir; the root was recorded alongside it.
+/// 2. **Alias override** (`dir_name` → slug) — the user's explicit last word.
 /// 3. **`cwd` from the transcript itself** — the launch directory's basename, the
 ///    only lossless source (the dir name's `/`→`-` encoding is ambiguous). Cached.
 /// 4. **Dir-name heuristic** — the lossy trailing-segment fallback, *not* cached so
 ///    a later read can upgrade it once the session writes its first `cwd` line.
 ///
-/// Steps 1–3 produce a stable slug for the session; only step 4 is provisional.
+/// The `cwd` read also feeds the context-string **roots registry** (slug → project
+/// root, docs/context-strings.md §4) — the same single read, one extra side table.
+/// A dir is only cached once its root is recorded, so an aliased dir whose
+/// transcript hasn't written `cwd` yet keeps retrying, exactly like step 4.
 fn resolve_slug(
     dir_name: &str,
     path: &Path,
     aliases: &HashMap<String, String>,
     cache: &mut HashMap<String, String>,
+    roots: &SharedRoots,
 ) -> Option<String> {
-    if let Some(slug) = aliases.get(dir_name) {
-        return Some(slug.clone());
-    }
     if let Some(slug) = cache.get(dir_name) {
         return Some(slug.clone());
     }
-    if let Some(slug) = slug_from_cwd(path) {
-        cache.insert(dir_name.to_string(), slug.clone());
-        return Some(slug);
+    let cwd = first_cwd(path);
+    // The slug: alias wins; else the cwd basename (the lossless source).
+    let slug = match aliases.get(dir_name) {
+        Some(alias) => Some(alias.clone()),
+        None => cwd.as_deref().and_then(|c| slugify(cwd_basename(c)?)),
+    };
+    match (slug, cwd) {
+        (Some(slug), Some(cwd)) => {
+            context::record_root(roots, &slug, rebase_root(&cwd, path));
+            cache.insert(dir_name.to_string(), slug.clone());
+            Some(slug)
+        }
+        // Alias with no cwd yet: the slug is stable but there's no root to record —
+        // don't cache, so a later append can pick the root up.
+        (Some(slug), None) => Some(slug),
+        (None, _) => slug_from_transcript_dir(dir_name),
     }
-    slug_from_transcript_dir(dir_name)
 }
 
-/// Read a transcript's launch directory from its **first** `cwd` line and return
-/// that path's basename — the project root, even if the session later `cd`s into a
-/// subdir. `None` if the file is unreadable, empty, or predates the `cwd` field
-/// (older transcripts). Stops at the first match, so it's cheap on large files.
+/// A cwd's final path segment, tolerating both separators (a Windows-style cwd
+/// must basename correctly too).
+fn cwd_basename(cwd: &str) -> Option<&str> {
+    cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next()
+}
+
+/// The slug derived from a transcript's launch cwd — [`first_cwd`]'s basename
+/// through the shared `slugify`. The hooks receiver resolves through this too, so
+/// both Claude Code surfaces agree on a session's project.
+pub(crate) fn slug_from_cwd(path: &Path) -> Option<String> {
+    slugify(cwd_basename(&first_cwd(path)?)?)
+}
+
+/// How far into a transcript [`first_summary`] looks. Summary lines live at the
+/// head of resumed/compacted session files; bounding the scan keeps a
+/// summary-less (fresh) session from costing a full-file read on every
+/// `SessionStart` hook.
+const SUMMARY_SCAN_LINES: usize = 64;
+
+/// The transcript's session summary, if Claude Code wrote one — resumed and
+/// compacted sessions carry `{"type":"summary","summary":"…"}` lines at the top
+/// describing the thread being continued. Best-effort: first summary in the head
+/// window wins; a fresh session has none.
+pub(crate) fn first_summary(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    for line in BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .take(SUMMARY_SCAN_LINES)
+    {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if val.get("type").and_then(|t| t.as_str()) == Some("summary") {
+            if let Some(s) = val.get("summary").and_then(|s| s.as_str()) {
+                if !s.trim().is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read a transcript's launch directory from its **first** `cwd` line — the
+/// project root, even if the session later `cd`s into a subdir. Its basename is
+/// the slug (run through the shared `slugify` so an fs-resolved slug converges
+/// with a browser-minted one for the same name, §5/§9); the path itself is the
+/// context-string root. `None` if the file is unreadable, empty, or predates the
+/// `cwd` field (older transcripts). Stops at the first match, so it's cheap on
+/// large files.
 ///
 /// Caveat: a transcript synced from another machine carries that machine's `cwd`
 /// (e.g. a macOS path under a Linux dir). That only affects *historical* files;
 /// the session you're actively working in is local, so its `cwd` is correct.
-pub(crate) fn slug_from_cwd(path: &Path) -> Option<String> {
+pub(crate) fn first_cwd(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
-            // Split on both separators so a Windows-style cwd basenames correctly,
-            // then run the basename through the shared `slugify` so an fs-resolved slug
-            // converges with a browser-minted one for the same project name (§5/§9).
-            let base = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next()?;
-            if let Some(slug) = slugify(base) {
-                return Some(slug);
-            }
+            return Some(cwd.to_string());
         }
     }
     None
+}
+
+/// Turn a transcript-reported cwd into a path *this* process can reach. The one
+/// interesting case: Whence running natively on Windows watching a `\\wsl$\<distro>`
+/// transcript tree — the cwd inside is a Unix path on that distro, so rebase it
+/// onto the tree's UNC prefix. Everywhere else the cwd is local and used as-is.
+fn rebase_root(cwd: &str, transcript_path: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    if cwd.starts_with('/') {
+        if let Some(prefix) = unc_prefix(transcript_path) {
+            let mut root = prefix;
+            for seg in cwd.split('/').filter(|s| !s.is_empty()) {
+                root.push(seg);
+            }
+            return root;
+        }
+    }
+    let _ = transcript_path;
+    PathBuf::from(cwd)
+}
+
+/// The UNC server+share prefix (`\\wsl$\<distro>`) of a network path, if any.
+#[cfg(target_os = "windows")]
+fn unc_prefix(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    match path.components().next()? {
+        Component::Prefix(pre) => match pre.kind() {
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) => Some(PathBuf::from(pre.as_os_str())),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -307,7 +397,7 @@ mod tests {
         // Nonexistent file → no cwd to read → dir-name fallback.
         let p = PathBuf::from("/home/u/.claude/projects/-root-Projects-waid/abc123.jsonl");
         let mut cache = HashMap::new();
-        let ev = event_for_path(&p, false, &no_aliases(), &mut cache).unwrap();
+        let ev = event_for_path(&p, false, &no_aliases(), &mut cache, &context::new_roots()).unwrap();
         assert_eq!(ev.project.as_deref(), Some("waid"));
         assert_eq!(ev.surface, Surface::ClaudeCode);
         assert_eq!(ev.kind, WorkKind::Active);
@@ -320,7 +410,7 @@ mod tests {
     fn new_file_is_session_start() {
         let p = PathBuf::from("/home/u/.claude/projects/-root-Projects-whence/s.jsonl");
         let mut cache = HashMap::new();
-        let ev = event_for_path(&p, true, &no_aliases(), &mut cache).unwrap();
+        let ev = event_for_path(&p, true, &no_aliases(), &mut cache, &context::new_roots()).unwrap();
         assert_eq!(ev.kind, WorkKind::SessionStart);
         assert_eq!(ev.project.as_deref(), Some("whence"));
     }
@@ -329,7 +419,7 @@ mod tests {
     fn ignores_non_jsonl() {
         let p = PathBuf::from("/home/u/.claude/projects/-root-Projects-waid/notes.txt");
         let mut cache = HashMap::new();
-        assert!(event_for_path(&p, false, &no_aliases(), &mut cache).is_none());
+        assert!(event_for_path(&p, false, &no_aliases(), &mut cache, &context::new_roots()).is_none());
     }
 
     #[test]
@@ -345,10 +435,35 @@ mod tests {
         writeln!(f, "{{\"type\":\"user\",\"cwd\":\"/root/Projects/blapp-web/src\"}}").unwrap();
 
         let mut cache = HashMap::new();
-        let ev = event_for_path(&p, false, &no_aliases(), &mut cache).unwrap();
+        let roots = context::new_roots();
+        let ev = event_for_path(&p, false, &no_aliases(), &mut cache, &roots).unwrap();
         assert_eq!(ev.project.as_deref(), Some("blapp-web"));
         // First (launch) cwd wins over the later subdir cwd, and it's cached.
         assert_eq!(cache.get("-root-Projects-blapp-web").map(String::as_str), Some("blapp-web"));
+        // The same read feeds the context-string roots registry: slug → launch dir.
+        assert_eq!(
+            context::root_for(&roots, "blapp-web"),
+            Some(PathBuf::from("/root/Projects/blapp-web"))
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn first_summary_reads_head_summary_line_only() {
+        let dir = std::env::temp_dir().join("whence-cc-summary");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("resumed.jsonl");
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "{{\"type\":\"summary\",\"summary\":\"Fix HEAD parser fixtures\"}}").unwrap();
+        writeln!(f, "{{\"type\":\"user\",\"cwd\":\"/root/Projects/whence\"}}").unwrap();
+        assert_eq!(first_summary(&p).as_deref(), Some("Fix HEAD parser fixtures"));
+
+        // A fresh session (no summary line) and a missing file both yield None.
+        let fresh = dir.join("fresh.jsonl");
+        std::fs::write(&fresh, "{\"type\":\"user\",\"cwd\":\"/root/Projects/whence\"}\n").unwrap();
+        assert_eq!(first_summary(&fresh), None);
+        assert_eq!(first_summary(&dir.join("nope.jsonl")), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -381,7 +496,31 @@ mod tests {
         let mut aliases = HashMap::new();
         aliases.insert("-root-Projects-glue-mac".to_string(), "glue-mac".to_string());
         let mut cache = HashMap::new();
-        let ev = event_for_path(&p, false, &aliases, &mut cache).unwrap();
+        let ev = event_for_path(&p, false, &aliases, &mut cache, &context::new_roots()).unwrap();
         assert_eq!(ev.project.as_deref(), Some("glue-mac"));
+    }
+
+    #[test]
+    fn alias_records_root_under_alias_slug() {
+        // The alias wins the slug, but the cwd read still records the project root
+        // under *that* slug — an aliased project gets context strings too.
+        let dir = std::env::temp_dir().join("-root-Projects-glue-mac-alias");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("session.jsonl");
+        std::fs::write(&p, "{\"type\":\"user\",\"cwd\":\"/root/Projects/glue-mac\"}\n").unwrap();
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "-root-Projects-glue-mac-alias".to_string(),
+            "glue-mac".to_string(),
+        );
+        let mut cache = HashMap::new();
+        let roots = context::new_roots();
+        let ev = event_for_path(&p, false, &aliases, &mut cache, &roots).unwrap();
+        assert_eq!(ev.project.as_deref(), Some("glue-mac"));
+        assert_eq!(
+            context::root_for(&roots, "glue-mac"),
+            Some(PathBuf::from("/root/Projects/glue-mac"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
