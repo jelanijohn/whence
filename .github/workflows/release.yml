@@ -29,7 +29,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # webkit2gtk 4.1 is the Tauri v2 baseline; ayatana-appindicator backs the
       # tray icon on Linux.
@@ -41,11 +41,11 @@ jobs:
             librsvg2-dev patchelf build-essential curl wget file libxdo-dev \
             libssl-dev libgtk-3-dev
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -73,7 +73,7 @@ jobs:
           jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tauri.conf.tmp
           mv tauri.conf.tmp src-tauri/tauri.conf.json
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
