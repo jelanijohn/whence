@@ -113,6 +113,7 @@ pub fn hook_to_event(
             WorkKind::Prompt => p
                 .prompt
                 .as_deref()
+                .filter(|s| !is_synthetic_prompt(s))
                 .map(crate::context::sanitize)
                 .filter(|s| !s.is_empty()),
             WorkKind::SessionStart => p
@@ -141,6 +142,24 @@ pub fn hook_to_event(
         confidence: 1.0, // cwd-derived attribution, same as the transcript adapter
         detail,
     })
+}
+
+/// True when a `UserPromptSubmit` payload is harness-injected rather than typed.
+/// Claude Code delivers synthetic turns — background-task notifications
+/// (`<task-notification><task-id>…`), slash-command expansions
+/// (`<command-name>…`), `!`-command output (`<local-command-stdout>…`) — through
+/// the same hook as real prompts. Those describe the harness's plumbing, not what
+/// you're working on, and because moments are last-writer-wins one would
+/// supersede your actual prompt on the widget. Heuristic: the prompt *starts*
+/// with an angle-bracket tag. The user-authored posture (docs/context-strings.md
+/// §10) prefers a false drop (a pasted `<div>` snippet degrades to the git
+/// fallback) over displaying machine text.
+fn is_synthetic_prompt(prompt: &str) -> bool {
+    prompt
+        .trim_start()
+        .strip_prefix('<')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 /// Resolve a project slug for a hook event, matching the transcript adapter's
@@ -528,6 +547,30 @@ mod tests {
         stop.prompt = Some("should never appear".into());
         let ev = hook_to_event(&stop, &no_aliases(), None, NOW, true).unwrap();
         assert_eq!(ev.detail, None);
+    }
+
+    #[test]
+    fn synthetic_harness_prompts_never_become_moments() {
+        let mut p = payload("UserPromptSubmit");
+        // Harness-injected turns fire UserPromptSubmit too; each would otherwise
+        // supersede the real prompt moment (last-writer-wins).
+        for synthetic in [
+            "<task-notification> <task-id>a40bcbb3</task-id> done",
+            "  <command-name>/commit</command-name>",
+            "<local-command-stdout>ok</local-command-stdout>",
+            "<system-reminder>background job finished</system-reminder>",
+        ] {
+            p.prompt = Some(synthetic.into());
+            let ev = hook_to_event(&p, &no_aliases(), None, NOW, true).unwrap();
+            assert_eq!(ev.detail, None, "captured synthetic prompt: {synthetic}");
+            // The focus evidence itself still flows — only the snippet is dropped.
+            assert_eq!(ev.kind, WorkKind::Prompt);
+        }
+
+        // Non-tag uses of `<` are still user text and keep their snippet.
+        p.prompt = Some("< 5 retries then bail".into());
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, true).unwrap();
+        assert_eq!(ev.detail.as_deref(), Some("< 5 retries then bail"));
     }
 
     #[test]
