@@ -146,6 +146,11 @@ pub struct Settings {
     /// effect. Defaulted so existing settings files load.
     #[serde(default = "default_widget_opacity")]
     pub widget_opacity: f64,
+    /// Render the widget in the dark theme (the `.dark` token set in app.css).
+    /// Default false (light). Frontend-only: the widget toggles the `dark` class
+    /// on `<html>`, no backend effect.
+    #[serde(default)]
+    pub dark_mode: bool,
     /// Float the widget above other windows. Default **true** (preserves the
     /// conf-set behavior). Applied to the main window at startup and on save.
     /// Cross-platform. Named default so settings files predating this field still
@@ -210,6 +215,7 @@ impl Default for Settings {
             corroborator_confidence_cutoff: 0.6,
             attention_recency_seconds: 120,
             widget_opacity: 1.0,
+            dark_mode: false,
             always_on_top: true,
             always_present: false,
         }

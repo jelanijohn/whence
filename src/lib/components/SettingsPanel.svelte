@@ -39,6 +39,7 @@
     corroboratorConfidenceCutoff: number;
     attentionRecencySeconds: number;
     widgetOpacity: number;
+    darkMode: boolean;
     alwaysOnTop: boolean;
     alwaysPresent: boolean;
     aliases: { key: string; value: string }[];
@@ -87,6 +88,7 @@
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
       attentionRecencySeconds: s.attentionRecencySeconds,
       widgetOpacity: s.widgetOpacity,
+      darkMode: s.darkMode,
       alwaysOnTop: s.alwaysOnTop,
       alwaysPresent: s.alwaysPresent,
       aliases: Object.entries(s.projectAliases ?? {}).map(([key, value]) => ({ key, value })),
@@ -130,6 +132,7 @@
       corroboratorConfidenceCutoff: clamp01(d.corroboratorConfidenceCutoff),
       attentionRecencySeconds: clampSecs(d.attentionRecencySeconds),
       widgetOpacity: clampOpacity(d.widgetOpacity),
+      darkMode: d.darkMode,
       alwaysOnTop: d.alwaysOnTop,
       alwaysPresent: d.alwaysPresent,
     };
@@ -159,6 +162,7 @@
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
       attentionRecencySeconds: s.attentionRecencySeconds,
       widgetOpacity: s.widgetOpacity,
+      darkMode: s.darkMode,
       alwaysOnTop: s.alwaysOnTop,
       alwaysPresent: s.alwaysPresent,
       aliases,
@@ -169,15 +173,22 @@
     draft && baseline ? canonical(toSettings(draft)) !== canonical(baseline) : false,
   );
 
-  // Opacity is the one setting with an immediate visual effect, so we live-preview
-  // it: mirror the draft into the appearance store (which drives the real `.panel`)
-  // while this panel is open, and restore the saved value on close so an unsaved
-  // drag reverts. Save persists baseline, so a saved change sticks past unmount.
+  // Opacity and dark mode have an immediate visual effect, so we live-preview
+  // them: mirror the draft into the appearance store (which drives the real
+  // `.panel` / the `dark` class on <html>) while this panel is open, and restore
+  // the saved values on close so an unsaved edit reverts. Save persists baseline,
+  // so a saved change sticks past unmount.
   $effect(() => {
-    if (draft) appearance.opacity = clampOpacity(draft.widgetOpacity);
+    if (draft) {
+      appearance.opacity = clampOpacity(draft.widgetOpacity);
+      appearance.dark = draft.darkMode;
+    }
   });
   onDestroy(() => {
-    if (baseline) appearance.opacity = clampOpacity(baseline.widgetOpacity);
+    if (baseline) {
+      appearance.opacity = clampOpacity(baseline.widgetOpacity);
+      appearance.dark = baseline.darkMode;
+    }
   });
 
   // Live NeuroSkill connection health (backend probe) — the in-panel echo of the
@@ -349,11 +360,15 @@
       </p>
     </div>
 
-    <!-- Appearance — whole-widget opacity. A constant value (not adaptive), so the
-         widget stays glanceable; floored at 30% so it never goes unreadable. The
-         slider live-previews as it moves (see the $effect above). -->
+    <!-- Appearance — dark mode + whole-widget opacity. Opacity is a constant value
+         (not adaptive), so the widget stays glanceable; floored at 30% so it never
+         goes unreadable. Both live-preview as they change (see the $effect above). -->
     <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
       <p class="label" style="margin-top: 8px;">Appearance</p>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Dark mode</span>
+        <Toggle bind:checked={draft.darkMode} label="Dark mode" />
+      </div>
       <div class="flex items-center justify-between gap-3">
         <span style="color: var(--fg-body); font-size: 13px;" title="Whole-widget opacity. Lower = more see-through; floored at 30% so it stays readable.">Widget opacity</span>
         <span class="inline-flex items-center gap-2" style="flex: 1; max-width: 168px;">
