@@ -113,7 +113,13 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
   `/`→`-` encoding is ambiguous (e.g. `glue-mac` → `mac`, `one-domino-square` →
   `square`), so cwd is preferred. Caveat: a transcript *synced from another
   machine* carries that machine's cwd — only affects historical files, since the
-  adapter reads the changed (local) file; pin such cases with an alias.
+  adapter reads the changed (local) file; pin such cases with an alias. A Claude
+  Code **managed-worktree** path (`<repo>/.claude/worktrees/<generated-name>`)
+  collapses to `<repo>` at every cwd→slug site (`collapse_worktree_cwd` in
+  `adapters/mod.rs`, plus the encoded `--claude-worktrees-` marker in
+  `slug_from_transcript_dir`) — worktree sessions are work on the repo, not a
+  throwaway per-worktree project; the context-string *root* stays the worktree
+  itself so the branch line reflects the checkout actually worked in.
 * **NeuroSkill label namespace:** `Whence:project=<slug>:start|end` — source-
   namespaced so it never collides with WAID's manual `waid:brief=<slug>:…`.
   Downstream prefers the manual `waid:` label on conflict.

@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{slug_from_transcript_dir, slugify, Surface, WorkEvent, WorkKind};
+use super::{
+    collapse_worktree_cwd, slug_from_transcript_dir, slugify, Surface, WorkEvent, WorkKind,
+};
 use crate::context::{self, SharedRoots};
 
 /// The user's home directory. `HOME` on Unix; Windows doesn't set it, so fall back
@@ -264,13 +266,19 @@ fn resolve_slug(
         return Some(slug.clone());
     }
     let cwd = first_cwd(path);
-    // The slug: alias wins; else the cwd basename (the lossless source).
+    // The slug: alias wins; else the cwd basename (the lossless source), with a
+    // managed-worktree cwd collapsed to its repo first — worktree sessions are
+    // still work on the repo, not a per-worktree project.
     let slug = match aliases.get(dir_name) {
         Some(alias) => Some(alias.clone()),
-        None => cwd.as_deref().and_then(|c| slugify(cwd_basename(c)?)),
+        None => cwd
+            .as_deref()
+            .and_then(|c| slugify(cwd_basename(collapse_worktree_cwd(c))?)),
     };
     match (slug, cwd) {
         (Some(slug), Some(cwd)) => {
+            // The root stays the *uncollapsed* cwd: a worktree has its own HEAD, so
+            // context strings show the branch you're actually on there.
             context::record_root(roots, &slug, rebase_root(&cwd, path));
             cache.insert(dir_name.to_string(), slug.clone());
             Some(slug)
@@ -292,7 +300,7 @@ fn cwd_basename(cwd: &str) -> Option<&str> {
 /// through the shared `slugify`. The hooks receiver resolves through this too, so
 /// both Claude Code surfaces agree on a session's project.
 pub(crate) fn slug_from_cwd(path: &Path) -> Option<String> {
-    slugify(cwd_basename(&first_cwd(path)?)?)
+    slugify(cwd_basename(collapse_worktree_cwd(&first_cwd(path)?))?)
 }
 
 /// How far into a transcript [`first_summary`] looks. Summary lines live at the
@@ -444,6 +452,34 @@ mod tests {
         assert_eq!(
             context::root_for(&roots, "blapp-web"),
             Some(PathBuf::from("/root/Projects/blapp-web"))
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_cwd_attributes_to_repo_but_roots_at_worktree() {
+        // A managed-worktree session is still work on the repo: the slug collapses
+        // to "whence", not the throwaway generated name — but the context root
+        // stays the worktree itself, whose HEAD carries the branch actually
+        // checked out there.
+        let dir = std::env::temp_dir()
+            .join("-root-Projects-whence--claude-worktrees-zippy-tinkering-graham");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("session.jsonl");
+        std::fs::write(
+            &p,
+            "{\"type\":\"user\",\"cwd\":\"/root/Projects/whence/.claude/worktrees/zippy-tinkering-graham\"}\n",
+        )
+        .unwrap();
+
+        let mut cache = HashMap::new();
+        let roots = context::new_roots();
+        let ev = event_for_path(&p, false, &no_aliases(), &mut cache, &roots).unwrap();
+        assert_eq!(ev.project.as_deref(), Some("whence"));
+        assert_eq!(
+            context::root_for(&roots, "whence"),
+            Some(PathBuf::from("/root/Projects/whence/.claude/worktrees/zippy-tinkering-graham"))
         );
 
         std::fs::remove_dir_all(&dir).ok();

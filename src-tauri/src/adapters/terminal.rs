@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{Surface, WorkEvent, WorkKind};
+use super::{collapse_worktree_cwd, Surface, WorkEvent, WorkKind};
 
 /// Corroboration confidence for a cwd hint — deliberately below the engine's
 /// `corroborator_confidence_cutoff` (~0.6, §7) so it's treated as reinforcing, not
@@ -92,7 +92,7 @@ fn resolve_slug(cwd: &str, aliases: &HashMap<String, String>) -> Option<String> 
     if let Some(slug) = aliases.get(&encode_dir_name(cwd)) {
         return Some(slug.clone());
     }
-    basename(cwd)
+    basename(collapse_worktree_cwd(cwd))
 }
 
 /// Encode a cwd to the transcript dir-name form Claude Code uses as the alias key
@@ -191,6 +191,19 @@ mod tests {
         // resolves correctly here without an alias.
         let ev = cwd_to_event(&payload("/root/one-domino-square"), &no_aliases(), NOW).unwrap();
         assert_eq!(ev.project.as_deref(), Some("one-domino-square"));
+    }
+
+    #[test]
+    fn worktree_cwd_corroborates_the_repo() {
+        // A shell inside a managed worktree is still working on the repo — the
+        // corroborating hint lands on "whence", not the generated worktree name.
+        let ev = cwd_to_event(
+            &payload("/root/Projects/whence/.claude/worktrees/zippy-tinkering-graham"),
+            &no_aliases(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(ev.project.as_deref(), Some("whence"));
     }
 
     #[test]

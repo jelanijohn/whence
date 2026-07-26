@@ -29,7 +29,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{claude_code, slug_from_transcript_dir, Surface, WorkEvent, WorkKind};
+use super::{
+    claude_code, collapse_worktree_cwd, slug_from_transcript_dir, Surface, WorkEvent, WorkKind,
+};
 
 /// The subset of a Claude Code hook payload we read. Claude Code adds fields over
 /// time, so everything is optional and unknown fields are ignored — a forward-
@@ -197,7 +199,9 @@ fn resolve_slug(
             return Some(slug);
         }
     }
-    p.cwd.as_deref().and_then(basename)
+    p.cwd
+        .as_deref()
+        .and_then(|c| basename(collapse_worktree_cwd(c)))
 }
 
 /// The transcript path *we* can read. The payload's `transcript_path` is the path
@@ -464,6 +468,27 @@ mod tests {
         p.cwd = Some("/root/Projects/glue".into());
         let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.project.as_deref(), Some("glue"));
+    }
+
+    #[test]
+    fn worktree_sessions_attribute_to_the_repo() {
+        // The live-cwd fallback collapses a managed-worktree cwd to its repo.
+        let mut p = payload("UserPromptSubmit");
+        p.transcript_path = None;
+        p.cwd = Some("/root/Projects/whence/.claude/worktrees/zippy-tinkering-graham".into());
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.project.as_deref(), Some("whence"));
+
+        // So does the dir-name fallback (unreadable transcript) — the observed
+        // failure mode where a worktree session surfaced as "graham".
+        let mut p = payload("Stop");
+        p.transcript_path = Some(
+            "/nonexistent/.claude/projects/-root-Projects-whence--claude-worktrees-zippy-tinkering-graham/s.jsonl"
+                .into(),
+        );
+        p.cwd = None;
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.project.as_deref(), Some("whence"));
     }
 
     #[test]
