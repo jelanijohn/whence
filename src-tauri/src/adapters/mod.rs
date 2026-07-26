@@ -120,9 +120,42 @@ impl WorkEvent {
 /// `one-domino-square`) resolve wrong here; that's what the user-editable alias
 /// map is for (see settings). Pure — unit-tested.
 pub fn slug_from_transcript_dir(dir_name: &str) -> Option<String> {
+    // A managed-worktree cwd (`<repo>/.claude/worktrees/<name>`) encodes with both
+    // `/` and `.` as `-`, so the marker survives as `--claude-worktrees-`. Collapse
+    // to the repo prefix before taking the trailing segment — same rationale as
+    // `collapse_worktree_cwd`, in dir-name space.
+    const WORKTREES_ENC: &str = "--claude-worktrees-";
+    let dir_name = match dir_name.find(WORKTREES_ENC) {
+        Some(i) if i > 0 && !dir_name[i + WORKTREES_ENC.len()..].trim_matches('-').is_empty() => {
+            &dir_name[..i]
+        }
+        _ => dir_name,
+    };
     let trimmed = dir_name.trim_matches('-');
     let last = trimmed.rsplit('-').next()?;
     slugify(last)
+}
+
+/// Collapse a Claude Code **managed-worktree** cwd to the repository it belongs to.
+///
+/// Claude Code's isolated worktrees live *inside* the repo at
+/// `<repo>/.claude/worktrees/<generated-name>` — a session launched there is still
+/// work on `<repo>`, but its cwd basename is the throwaway generated name
+/// (`zippy-tinkering-graham`), which would mint a bogus one-off project per
+/// worktree and fragment the repo's attribution. Truncate at the marker so every
+/// cwd→slug site lands on the repo; paths without the marker (including anything
+/// the repo owner deliberately named) pass through untouched. Both separators, so
+/// a Windows-native watcher collapses a `C:\…` cwd too. Pure — unit-tested.
+pub fn collapse_worktree_cwd(cwd: &str) -> &str {
+    for marker in ["/.claude/worktrees/", "\\.claude\\worktrees\\"] {
+        if let Some(i) = cwd.find(marker) {
+            let tail = &cwd[i + marker.len()..];
+            if i > 0 && tail.chars().any(|c| !matches!(c, '/' | '\\')) {
+                return &cwd[..i];
+            }
+        }
+    }
+    cwd
 }
 
 /// The **shared** slug primitive (§5/§9) — the load-bearing convergence decision.
@@ -169,6 +202,50 @@ mod tests {
         assert_eq!(slug_from_transcript_dir("").as_deref(), None);
         // Known lossy case the alias map covers.
         assert_eq!(slug_from_transcript_dir("-root-one-domino-square").as_deref(), Some("square"));
+    }
+
+    #[test]
+    fn slug_collapses_managed_worktree_dirs() {
+        // A worktree session's dir encodes `<repo>/.claude/worktrees/<name>` — the
+        // trailing segment would be the throwaway generated name ("graham"), so the
+        // repo prefix wins instead.
+        assert_eq!(
+            slug_from_transcript_dir(
+                "-root-Projects-whence--claude-worktrees-zippy-tinkering-graham"
+            )
+            .as_deref(),
+            Some("whence")
+        );
+        // A marker with nothing after it isn't a worktree path — fall through.
+        assert_eq!(
+            slug_from_transcript_dir("-root-Projects-whence--claude-worktrees-").as_deref(),
+            Some("worktrees")
+        );
+    }
+
+    #[test]
+    fn collapse_worktree_cwd_truncates_to_repo() {
+        assert_eq!(
+            collapse_worktree_cwd("/root/Projects/whence/.claude/worktrees/zippy-tinkering-graham"),
+            "/root/Projects/whence"
+        );
+        // A session that cd'd deeper still collapses to the repo.
+        assert_eq!(
+            collapse_worktree_cwd("/root/Projects/whence/.claude/worktrees/wadler/src-tauri"),
+            "/root/Projects/whence"
+        );
+        // Windows separators collapse too.
+        assert_eq!(
+            collapse_worktree_cwd(r"C:\Users\u\proj\.claude\worktrees\name"),
+            r"C:\Users\u\proj"
+        );
+        // Non-worktree paths pass through untouched.
+        assert_eq!(collapse_worktree_cwd("/root/Projects/whence"), "/root/Projects/whence");
+        // A bare marker with no worktree name after it isn't collapsed.
+        assert_eq!(
+            collapse_worktree_cwd("/root/Projects/whence/.claude/worktrees/"),
+            "/root/Projects/whence/.claude/worktrees/"
+        );
     }
 
     #[test]
