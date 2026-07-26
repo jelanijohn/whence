@@ -12,6 +12,7 @@ import type {
 
 export const FOCUS_EVENT = "whence://focus";
 export const NEUROSKILL_EVENT = "whence://neuroskill";
+export const SETTINGS_EVENT = "whence://settings";
 
 /** Current focus snapshot — every live session (each with status + row-timer start). */
 export function getFocusState(): Promise<FocusSnapshot> {
@@ -49,6 +50,11 @@ export function getBrowserMappingPath(): Promise<string> {
 /** Persist settings. Toggling `autostart` registers/unregisters the launch agent. */
 export function setSettings(settings: Settings): Promise<Settings> {
   return invoke("set_settings", { settings });
+}
+
+/** Open the settings popup window, or focus it if already open. */
+export function openSettings(): Promise<void> {
+  return invoke("open_settings");
 }
 
 /** Install (opt-in) the Claude Code `http` hooks that feed live `awaiting_input`
@@ -89,4 +95,12 @@ export function onNeuroskillStatus(
   cb: (status: NeuroskillStatus) => void,
 ): Promise<UnlistenFn> {
   return listen<NeuroskillStatus>(NEUROSKILL_EVENT, (e) => cb(e.payload));
+}
+
+/** Subscribe to settings saves (broadcast from `set_settings`) — how the widget
+ *  realm picks up appearance changes made in the settings window. */
+export function onSettingsChanged(
+  cb: (settings: Settings) => void,
+): Promise<UnlistenFn> {
+  return listen<Settings>(SETTINGS_EVENT, (e) => cb(e.payload));
 }

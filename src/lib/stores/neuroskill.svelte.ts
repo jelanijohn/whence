@@ -17,9 +17,13 @@ export async function startNeuroskill(): Promise<void> {
   } catch {
     // Backend not up yet (e.g. `vite dev` without Tauri) — stay on "unknown".
   }
-  unlisten = await onNeuroskillStatus((status) => {
-    neuroskill.status = status;
-  });
+  try {
+    unlisten = await onNeuroskillStatus((status) => {
+      neuroskill.status = status;
+    });
+  } catch {
+    // No event API either — status just stays at its hydrated value.
+  }
 }
 
 export function stopNeuroskill(): void {
