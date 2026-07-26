@@ -87,7 +87,9 @@ Hosts `<SettingsPanel />`. Its own realm needs: hydrate appearance (`loadAppeara
   });
 </script>
 
-<div class="settings-window select-none">
+<!-- select-text overrides the body's inherited user-select:none — the panel
+     shows copyable values (receiver token, paths, terminal snippet). -->
+<div class="settings-window select-text">
   <SettingsPanel />
 </div>
 
