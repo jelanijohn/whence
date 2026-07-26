@@ -1,6 +1,6 @@
 # Plan: Settings as a separate popup window
 
-*Status: planned, not yet implemented (saved 2026-07-26).*
+*Status: implemented (PR #15, 2026-07-26).*
 
 ## Context
 
