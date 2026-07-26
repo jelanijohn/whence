@@ -153,6 +153,7 @@ export interface Settings {
   corroboratorConfidenceCutoff: number; // ≥ this = primary signal; below = weak hint (§7)
   attentionRecencySeconds: number; // present-vs-running boundary: act recency window (§7)
   widgetOpacity: number; // whole-widget opacity, 0.3..1 (1 = opaque); constant, frontend-only
+  darkMode: boolean; // dark theme (`.dark` on <html>); default false, frontend-only
   alwaysOnTop: boolean; // float above other windows; default true
   alwaysPresent: boolean; // visible on all workspaces/desktops; macOS + Linux (GNOME) only, default false
 }

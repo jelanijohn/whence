@@ -113,9 +113,14 @@
     return () => stopNeuroskill();
   });
 
-  // Hydrate the widget opacity once; the Settings slider then drives it live.
+  // Hydrate the widget appearance once; the Settings panel then drives it live.
   $effect(() => {
     loadAppearance();
+  });
+
+  // The dark tokens in app.css are class-based; mirror the store flag onto <html>.
+  $effect(() => {
+    document.documentElement.classList.toggle("dark", appearance.dark);
   });
 
   // Keep the window sized to the current view + live project rows + expanded sources.
