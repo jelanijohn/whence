@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -16,6 +16,10 @@ use crate::orchestrator::{SharedSnapshot, TimelineRecord, WidgetSnapshot};
 use crate::engine::timeline;
 use crate::neuroskill::health::{NeuroskillStatus, SharedStatus};
 use crate::settings::{self, Settings};
+
+/// Broadcast on every settings save (mirrors `orchestrator::FOCUS_EVENT`) so the
+/// widget realm picks up appearance changes made in the settings window.
+pub const SETTINGS_EVENT: &str = "whence://settings";
 
 /// Managed app state, shared across commands and the core task.
 pub struct AppState {
@@ -217,7 +221,32 @@ pub fn set_settings(
         let _ = win.set_visible_on_all_workspaces(settings.always_present);
     }
 
+    // Broadcast the save so other webview realms (the widget, while settings live
+    // in their own window) refresh appearance without a second event channel.
+    let _ = app.emit(SETTINGS_EVENT, &settings);
+
     Ok(settings)
+}
+
+/// Open the settings popup, or focus it if already open. Settings live in their
+/// own decorated window (label "settings", route /settings) so the widget stays
+/// compact.
+#[tauri::command]
+pub fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, "settings", tauri::WebviewUrl::App("settings".into()))
+        .title("Whence Settings")
+        .inner_size(400.0, 560.0)
+        .min_inner_size(340.0, 420.0)
+        .center()
+        .build()
+        .map_err(|e| format!("could not open settings window: {e}"))?;
+    Ok(())
 }
 
 /// The Claude Code lifecycle events Whence registers `http` hooks for. `Stop` and

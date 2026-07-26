@@ -239,6 +239,7 @@ pub fn run() {
             commands::get_browser_mapping_path,
             commands::get_settings,
             commands::set_settings,
+            commands::open_settings,
             commands::install_claude_hooks,
             commands::uninstall_claude_hooks,
             commands::get_receiver_auth,

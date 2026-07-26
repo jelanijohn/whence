@@ -1,9 +1,13 @@
 // Widget appearance, as a Svelte 5 rune: the whole-widget opacity (a constant,
 // user-set value — see Settings.widgetOpacity) and the dark-mode flag (see
 // Settings.darkMode). The widget binds the `.panel` to `appearance.opacity` and
-// mirrors `appearance.dark` onto the `dark` class on <html>; +page hydrates both
-// once on mount, and the Settings panel writes through them for live preview.
-import { getSettings } from "$lib/tauri";
+// mirrors `appearance.dark` onto the `dark` class on <html>. Settings live in
+// their own window (own JS realm), so the panel no longer live-drives the
+// widget: the widget hydrates once via `startAppearance` and then tracks the
+// `whence://settings` broadcast fired on every Save. The settings window still
+// gets live preview — the panel writes through this store in its *own* realm.
+import { getSettings, onSettingsChanged } from "$lib/tauri";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 // Floor matches the UI slider min and the Rust doc — never let the widget go
 // unreadable / effectively un-clickable.
@@ -29,4 +33,20 @@ export async function loadAppearance(): Promise<void> {
   } catch {
     // Backend not up — stay on the defaults.
   }
+}
+
+let unlisten: UnlistenFn | null = null;
+
+/** Hydrate once, then track settings saves — the widget's cross-window feed. */
+export async function startAppearance(): Promise<void> {
+  await loadAppearance();
+  unlisten = await onSettingsChanged((s) => {
+    appearance.opacity = clampOpacity(s.widgetOpacity);
+    appearance.dark = s.darkMode;
+  });
+}
+
+export function stopAppearance(): void {
+  unlisten?.();
+  unlisten = null;
 }

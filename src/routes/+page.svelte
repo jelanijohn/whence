@@ -6,8 +6,17 @@
     startNeuroskill,
     stopNeuroskill,
   } from "$lib/stores/neuroskill.svelte";
-  import { appearance, loadAppearance } from "$lib/stores/appearance.svelte";
-  import { getTodayBlocks, getFocusIntensity, focusSource } from "$lib/tauri";
+  import {
+    appearance,
+    startAppearance,
+    stopAppearance,
+  } from "$lib/stores/appearance.svelte";
+  import {
+    getTodayBlocks,
+    getFocusIntensity,
+    focusSource,
+    openSettings,
+  } from "$lib/tauri";
   import type { FocusBlock, SourceSnapshot } from "$lib/types";
   import type { Status } from "$lib/types";
   import BrandMark from "$lib/components/BrandMark.svelte";
@@ -15,9 +24,8 @@
   import IntensityMeter from "$lib/components/IntensityMeter.svelte";
   import NeuroskillStatusDot from "$lib/components/NeuroskillStatusDot.svelte";
   import BlockTimeline from "$lib/components/BlockTimeline.svelte";
-  import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 
-  type View = "compact" | "timeline" | "settings";
+  type View = "compact" | "timeline";
 
   // The compact area is a title bar + N project rows (+ any expanded source rows),
   // so its height is dynamic. Expanded views add a fixed section below it.
@@ -30,7 +38,6 @@
   const LIST_PAD = 12;
   const SECTION_H: Record<Exclude<View, "compact">, number> = {
     timeline: 168,
-    settings: 328,
   };
   const WIDTH = 300;
 
@@ -113,9 +120,10 @@
     return () => stopNeuroskill();
   });
 
-  // Hydrate the widget appearance once; the Settings panel then drives it live.
+  // Hydrate the widget appearance, then track settings-window saves.
   $effect(() => {
-    loadAppearance();
+    startAppearance();
+    return () => stopAppearance();
   });
 
   // The dark tokens in app.css are class-based; mirror the store flag onto <html>.
@@ -174,9 +182,9 @@
       <IntensityMeter value={intensity} />
       <button
         class="msym"
-        style="color: {view === 'settings' ? 'var(--accent)' : 'var(--fg3)'}; font-size: 18px; cursor: pointer;"
+        style="color: var(--fg3); font-size: 18px; cursor: pointer;"
         title="Settings"
-        onclick={() => setView("settings")}
+        onclick={() => openSettings().catch(() => {})}
       >
         settings
       </button>
@@ -232,8 +240,6 @@
         <div class="wn-scroll overflow-y-auto pt-2">
           <BlockTimeline {blocks} />
         </div>
-      {:else if view === "settings"}
-        <SettingsPanel />
       {/if}
     </div>
   {/if}
