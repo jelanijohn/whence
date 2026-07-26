@@ -164,7 +164,8 @@
   >
     <span class="inline-flex items-center gap-2">
       <BrandMark size={18} />
-      <span class="font-semibold" style="color: var(--fg); font-size: 15px;"
+      <span
+        style="color: var(--title-fg); font-weight: var(--title-weight); font-size: 15px;"
         >Whence</span
       >
     </span>

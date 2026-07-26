@@ -120,6 +120,8 @@
   --fg2: #6a6f7a;
   --fg3: #9ca1ab;
   --fg4: #b9bdc6;
+  --title-fg: var(--fg);
+  --title-weight: 600;
   --accent-tint: color-mix(in srgb, var(--accent) 9%, transparent);
   --shadow-win: 0 10px 30px rgba(18, 28, 48, 0.16), 0 0 0 1px rgba(18, 28, 48, 0.06);
 }
@@ -135,6 +137,10 @@
   --fg2: #868c97;
   --fg3: #5c626d;
   --fg4: #474d57;
+  /* Dark title reads dimmer + lighter-weight than --fg/semibold — a bright bold
+     title glares on the dark panel. */
+  --title-fg: var(--fg-body);
+  --title-weight: 500;
   --accent: #2dd4bf;
   --accent-tint: color-mix(in srgb, var(--accent) 16%, transparent);
   --shadow-win: 0 16px 44px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08);
