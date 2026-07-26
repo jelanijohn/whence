@@ -7,6 +7,7 @@
 mod adapters;
 mod auth;
 mod commands;
+mod context;
 mod engine;
 mod orchestrator;
 mod neuroskill;
@@ -19,7 +20,6 @@ use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
 use crate::commands::AppState;
-use crate::engine::segment::FocusSnapshot;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -64,8 +64,12 @@ pub fn run() {
             tray::init(app.handle())?;
 
             let shared: orchestrator::SharedSnapshot =
-                Arc::new(Mutex::new(FocusSnapshot { projects: Vec::new() }));
+                Arc::new(Mutex::new(orchestrator::WidgetSnapshot::default()));
             let settings_state = Arc::new(Mutex::new(loaded.clone()));
+            // Slug → project-root side table: written by the transcript watcher
+            // (from the cwd it already reads), read by the orchestrator to resolve
+            // context strings. Display-only plumbing (docs/context-strings.md).
+            let roots: context::SharedRoots = context::new_roots();
             let neuroskill_status: neuroskill::health::SharedStatus =
                 Arc::new(Mutex::new(neuroskill::health::NeuroskillStatus::default()));
 
@@ -96,6 +100,11 @@ pub fn run() {
                 receiver_token: receiver_token.clone(),
                 auth_denials: auth_denials.clone(),
             });
+
+            // The core task reads settings through the shared handle too, so the
+            // NeuroSkill and context-string toggles apply without a restart (the
+            // segmenter's tunables are still read once, at startup).
+            let settings_for_core = settings_state.clone();
 
             // NeuroSkill connection health: an independent probe loop that keeps the
             // widget's connection indicator honest. Reads settings each tick, so it
@@ -195,6 +204,7 @@ pub fn run() {
                     tx,
                     aliases,
                     loaded.claude_dir.as_deref(),
+                    roots.clone(),
                 ) {
                     Ok(w) => Some(w),
                     Err(e) => {
@@ -202,7 +212,7 @@ pub fn run() {
                         None
                     }
                 };
-                orchestrator::run(handle, rx, shared, data_dir, loaded).await;
+                orchestrator::run(handle, rx, shared, data_dir, settings_for_core, roots).await;
             });
 
             Ok(())

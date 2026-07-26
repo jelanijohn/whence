@@ -65,6 +65,17 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
     token path are both overridable via `Settings` (`neuroskill_endpoint`,
     `neuroskill_token_path`); the token is read at call time so rotation/discovery
     needs no restart.
+* **`src-tauri/src/context.rs`** — context strings (docs/context-strings.md):
+  the display-only "git branch · last commit" line beside the focused project and
+  stamped onto closing timeline blocks. Branch = pure HEAD-file parse (worktree
+  `gitdir:` redirects followed); subject = best-effort `git log -1` spawn, 2 s
+  timeout, silent degrade. The orchestrator attaches it *downstream* of
+  segmentation via wrapper types (`WidgetSnapshot`/`TimelineRecord`, serde-
+  flattened) — a tripwire test forbids any context reference under `engine/` or
+  `neuroskill/`, and the NeuroSkill label stays byte-identical. Roots come from a
+  slug→root side table the transcript watcher fills from the `cwd` it already
+  reads. Toggle: `context_strings` (default on); TTL: `context_ttl_seconds`
+  (file-only knob).
 * **`src-tauri/src/orchestrator.rs`** — wires adapters → segmenter → outputs. The
   *only* place allowed to be impure around the engine.
 * **`src/`** — the SvelteKit widget (Svelte 5 runes, SPA, Tailwind v4). Reuses

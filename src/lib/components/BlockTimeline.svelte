@@ -19,6 +19,14 @@
     const m = Math.floor((secs % 3600) / 60);
     return h > 0 ? `${h}h${m.toString().padStart(2, "0")}m` : `${m}m`;
   }
+
+  function clock(unix: number): string {
+    return new Date(unix * 1000).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  }
 </script>
 
 <div class="flex flex-col gap-2 px-3 pb-3">
@@ -43,6 +51,26 @@
         <div class="flex items-center justify-between" style="font-size: 12px;">
           <span class="truncate" style="color: var(--fg-body);">{project}</span>
           <span class="tabular-nums" style="color: var(--fg2);">{dur(secs)}</span>
+        </div>
+      {/each}
+    </div>
+    <!-- per-block rows: when + where, with the stored context string as the memory
+         jogger (docs/context-strings.md §6). Blocks without one just show the span. -->
+    <div
+      class="flex flex-col gap-1"
+      style="border-top: 1px solid var(--border-soft); padding-top: 8px;"
+    >
+      {#each blocks as b (b.start)}
+        <div class="flex items-baseline gap-2" style="font-size: 12px;">
+          <span class="tabular-nums shrink-0" style="color: var(--fg3);"
+            >{clock(b.start)}–{clock(b.end)}</span
+          >
+          <span class="shrink-0" style="color: var(--fg-body);">{b.project}</span>
+          {#if b.context}
+            <span class="truncate" style="color: var(--fg3);" title={b.context.text}
+              >{b.context.text}</span
+            >
+          {/if}
         </div>
       {/each}
     </div>

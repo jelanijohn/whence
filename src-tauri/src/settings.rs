@@ -96,6 +96,19 @@ pub struct Settings {
     /// header on its POSTs and on `GET /raise`.
     #[serde(default)]
     pub browser_listen_addr_override: Option<String>,
+    /// Show a context string (git branch · last commit subject) beside the focused
+    /// project and stamp it onto closing timeline blocks. **Display-only** — never
+    /// an attribution input, never in a NeuroSkill label (docs/context-strings.md
+    /// §2). Default **on**: v1 sources are user-authored text (branch names,
+    /// commit subjects), so there's nothing content-derived to gate. Off = no
+    /// resolution, no snapshot field, no block stamping.
+    #[serde(default = "default_context_strings")]
+    pub context_strings: bool,
+    /// How long a resolved context string stays fresh before the next snapshot
+    /// emit re-resolves it (docs/context-strings.md §4). Settings-file-only knob —
+    /// no UI; calibrate by feel.
+    #[serde(default = "default_context_ttl")]
+    pub context_ttl_seconds: u64,
     /// Sustained seconds before a focus switch is confirmed.
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
@@ -133,6 +146,14 @@ fn default_corroborator_cutoff() -> f64 {
     0.6
 }
 
+fn default_context_strings() -> bool {
+    true
+}
+
+fn default_context_ttl() -> u64 {
+    60
+}
+
 fn default_always_on_top() -> bool {
     true
 }
@@ -162,6 +183,8 @@ impl Default for Settings {
             terminal_listen_addr_override: None,
             browser_enabled: false,
             browser_listen_addr_override: None,
+            context_strings: true,
+            context_ttl_seconds: 60,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
             corroborator_confidence_cutoff: 0.6,

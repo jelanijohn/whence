@@ -31,6 +31,7 @@
     ollamaEndpoint: string;
     terminalEnabled: boolean;
     browserEnabled: boolean;
+    contextStrings: boolean;
     switchMinSeconds: number;
     idleTimeoutSeconds: number;
     corroboratorConfidenceCutoff: number;
@@ -76,6 +77,7 @@
       ollamaEndpoint: s.ollamaEndpoint ?? "",
       terminalEnabled: s.terminalEnabled,
       browserEnabled: s.browserEnabled,
+      contextStrings: s.contextStrings,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -115,6 +117,7 @@
       ollamaEndpoint: d.ollamaEndpoint.trim() || null,
       terminalEnabled: d.terminalEnabled,
       browserEnabled: d.browserEnabled,
+      contextStrings: d.contextStrings,
       projectAliases,
       switchMinSeconds: clampSecs(d.switchMinSeconds),
       idleTimeoutSeconds: clampSecs(d.idleTimeoutSeconds),
@@ -142,6 +145,7 @@
       ollamaEndpoint: s.ollamaEndpoint ?? null,
       terminalEnabled: s.terminalEnabled,
       browserEnabled: s.browserEnabled,
+      contextStrings: s.contextStrings,
       switchMinSeconds: s.switchMinSeconds,
       idleTimeoutSeconds: s.idleTimeoutSeconds,
       corroboratorConfidenceCutoff: s.corroboratorConfidenceCutoff,
@@ -359,6 +363,20 @@
           >
         </span>
       </div>
+    </div>
+
+    <!-- Context strings — display-only recall (docs/context-strings.md). Applies
+         live on Save (the orchestrator reads the shared settings each wake). -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Context</p>
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">Context strings</span>
+        <Toggle bind:checked={draft.contextStrings} label="Context strings" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Shows the focused project's git branch · last commit beside the attribution,
+        and stamps it onto past blocks. Display-only — never part of a NeuroSkill label.
+      </p>
     </div>
 
     <!-- Segmenter -->

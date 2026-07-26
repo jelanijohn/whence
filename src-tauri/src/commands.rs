@@ -12,8 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::adapters::browser::RaiseQueue;
 use crate::adapters::{Surface, WorkEvent, WorkKind};
-use crate::orchestrator::SharedSnapshot;
-use crate::engine::segment::{FocusBlock, FocusSnapshot};
+use crate::orchestrator::{SharedSnapshot, TimelineRecord, WidgetSnapshot};
 use crate::engine::timeline;
 use crate::neuroskill::health::{NeuroskillStatus, SharedStatus};
 use crate::settings::{self, Settings};
@@ -39,15 +38,16 @@ pub struct AppState {
     pub auth_denials: crate::auth::Denials,
 }
 
-/// Current focus snapshot — every live session (each with its own status + timer).
-/// A poisoned lock falls back to "no sessions" (idle) rather than panicking.
+/// Current focus snapshot — every live session (each with its own status + timer),
+/// plus the focused project's context string when one has resolved. A poisoned
+/// lock falls back to "no sessions" (idle) rather than panicking.
 #[tauri::command]
-pub fn get_focus_state(state: State<AppState>) -> FocusSnapshot {
+pub fn get_focus_state(state: State<AppState>) -> WidgetSnapshot {
     state
         .snapshot
         .lock()
         .map(|g| g.clone())
-        .unwrap_or(FocusSnapshot { projects: Vec::new() })
+        .unwrap_or_default()
 }
 
 /// Manually raise a browser tab and pull its project into focus. The frontend only
@@ -78,9 +78,10 @@ pub fn focus_source(state: State<AppState>, project: String, source: String) -> 
     state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
 }
 
-/// Today's closed focus blocks, oldest first — drives the expanded timeline.
+/// Today's closed focus blocks, oldest first — drives the expanded timeline. Each
+/// carries its stored context stamp, if the block closed with one.
 #[tauri::command]
-pub fn get_today_blocks(state: State<AppState>) -> Result<Vec<FocusBlock>, String> {
+pub fn get_today_blocks(state: State<AppState>) -> Result<Vec<TimelineRecord>, String> {
     let path = timeline::timeline_path(&state.data_dir);
     timeline::read_day(&path, chrono::Utc::now().timestamp())
         .map_err(|e| format!("could not read timeline: {e}"))

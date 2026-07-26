@@ -27,8 +27,23 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{Local, TimeZone};
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::engine::segment::FocusBlock;
+
+/// A record with a block start time — what the day filter keys on. Generic so the
+/// store can hold the bare engine [`FocusBlock`] *or* the orchestrator's stamped
+/// record without this module knowing about the extras (the engine tree stays
+/// free of display-only concerns).
+pub trait HasStart {
+    fn start_secs(&self) -> i64;
+}
+
+impl HasStart for FocusBlock {
+    fn start_secs(&self) -> i64 {
+        self.start
+    }
+}
 
 /// Resolve the timeline file path under the app data dir (`<data>/timeline.jsonl`).
 pub fn timeline_path(data_dir: &Path) -> PathBuf {
@@ -37,7 +52,7 @@ pub fn timeline_path(data_dir: &Path) -> PathBuf {
 
 /// Append one closed block as a JSON line. Best-effort durability (see module
 /// docs); returns the I/O error so the caller can log it without crashing.
-pub fn append_block(path: &Path, block: &FocusBlock) -> std::io::Result<()> {
+pub fn append_block<T: Serialize>(path: &Path, block: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -50,7 +65,7 @@ pub fn append_block(path: &Path, block: &FocusBlock) -> std::io::Result<()> {
 
 /// Read every block, skipping any unparseable (e.g. crash-truncated) line. Missing
 /// file → empty vec.
-pub fn read_all(path: &Path) -> std::io::Result<Vec<FocusBlock>> {
+pub fn read_all<T: DeserializeOwned>(path: &Path) -> std::io::Result<Vec<T>> {
     let f = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -62,7 +77,7 @@ pub fn read_all(path: &Path) -> std::io::Result<Vec<FocusBlock>> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(b) = serde_json::from_str::<FocusBlock>(&line) {
+        if let Ok(b) = serde_json::from_str::<T>(&line) {
             out.push(b);
         }
         // Unparseable line → skip (tolerate a truncated trailing record).
@@ -72,11 +87,11 @@ pub fn read_all(path: &Path) -> std::io::Result<Vec<FocusBlock>> {
 
 /// Blocks whose `start` falls on the local calendar day containing `now` (unix
 /// seconds), oldest first — drives the widget's expanded timeline.
-pub fn read_day(path: &Path, now: i64) -> std::io::Result<Vec<FocusBlock>> {
+pub fn read_day<T: DeserializeOwned + HasStart>(path: &Path, now: i64) -> std::io::Result<Vec<T>> {
     let (day_start, day_end) = local_day_bounds(now);
-    let mut blocks = read_all(path)?;
-    blocks.retain(|b| b.start >= day_start && b.start < day_end);
-    blocks.sort_by_key(|b| b.start);
+    let mut blocks = read_all::<T>(path)?;
+    blocks.retain(|b| b.start_secs() >= day_start && b.start_secs() < day_end);
+    blocks.sort_by_key(|b| b.start_secs());
     Ok(blocks)
 }
 
@@ -117,7 +132,7 @@ mod tests {
 
         append_block(&path, &block("waid", 100, 200)).unwrap();
         append_block(&path, &block("whoami", 300, 450)).unwrap();
-        let all = read_all(&path).unwrap();
+        let all = read_all::<FocusBlock>(&path).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].project, "waid");
         assert_eq!(all[1].end, 450);
@@ -135,7 +150,7 @@ mod tests {
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"{\"project\":\"whoami\",\"start\":3").unwrap();
         drop(f);
-        let all = read_all(&path).unwrap();
+        let all = read_all::<FocusBlock>(&path).unwrap();
         assert_eq!(all.len(), 1); // the good line survives, the garbage is skipped
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -144,6 +159,6 @@ mod tests {
     fn missing_file_is_empty() {
         let path = std::env::temp_dir().join("whence-nope-xyz.jsonl");
         let _ = std::fs::remove_file(&path);
-        assert!(read_all(&path).unwrap().is_empty());
+        assert!(read_all::<FocusBlock>(&path).unwrap().is_empty());
     }
 }
