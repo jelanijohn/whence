@@ -8,12 +8,14 @@
 // Run:             pnpm screenshots
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 // 1427 so a running `pnpm dev` (1425, strictPort) or `tauri:dev2` (1435) never collides.
 const PORT = 1427;
 const BASE_URL = `http://localhost:${PORT}`;
-const OUT_DIR = new URL("../docs/screenshots/", import.meta.url).pathname;
+// fileURLToPath, not .pathname — the latter mangles Windows paths (`/C:/...`).
+const OUT_DIR = fileURLToPath(new URL("../docs/screenshots/", import.meta.url));
 
 // Widget geometry — mirrors the height math in src/routes/+page.svelte
 // (TITLE_H + rows*ROW_H + expandedSources*SOURCE_ROW_H + context*CONTEXT_ROW_H
