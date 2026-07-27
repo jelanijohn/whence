@@ -29,6 +29,11 @@ const SETTINGS_W = 400;
 const SETTINGS_H = 560;
 // Breathing room so the panel's box-shadow isn't clipped at the PNG edge.
 const PAD = 24;
+// Pinned page-context time (clock.setFixedTime): Date.now() is fixed — so the
+// mock's offsets and every timer readout are identical across themes and runs —
+// while real timers keep firing (the settings "Saved" flash still clears). An
+// afternoon, so the mock's 09:04–15:47 workday is fully in the past.
+const FROZEN_TIME = new Date("2026-07-20T16:20:00");
 
 function startDevServer() {
   return spawn("pnpm", ["exec", "vite", "dev"], {
@@ -67,11 +72,14 @@ async function settleFonts(page) {
 // live-preview drives the `dark` class, and the knob renders ON — keeping the
 // shot self-consistent); pages without a switch get the class injected directly.
 async function captureBothThemes(page, name, goDark = null) {
-  await page.screenshot({ path: `${OUT_DIR}${name}-light.png`, omitBackground: true });
+  // animations: "disabled" pins the status dot's infinite tw-pulse to a fixed
+  // phase — with the frozen clock, that makes captures byte-identical across runs.
+  const opts = { omitBackground: true, animations: "disabled" };
+  await page.screenshot({ ...opts, path: `${OUT_DIR}${name}-light.png` });
   if (goDark) await goDark();
   else await page.evaluate(() => document.documentElement.classList.add("dark"));
   await page.waitForTimeout(100);
-  await page.screenshot({ path: `${OUT_DIR}${name}-dark.png`, omitBackground: true });
+  await page.screenshot({ ...opts, path: `${OUT_DIR}${name}-dark.png` });
 }
 
 /** A widget page: padded viewport (shadow room) with the panel inset to fit. */
@@ -80,6 +88,7 @@ async function widgetPage(browser, height) {
     viewport: { width: WIDTH + 2 * PAD, height: height + 2 * PAD },
     deviceScaleFactor: 2,
   });
+  await page.clock.setFixedTime(FROZEN_TIME);
   await page.goto(BASE_URL);
   await page.addStyleTag({
     content: `body { padding: ${PAD}px; } .panel { height: calc(100vh - ${2 * PAD}px); }`,
@@ -121,6 +130,7 @@ async function main() {
       viewport: { width: SETTINGS_W, height: SETTINGS_H },
       deviceScaleFactor: 2,
     });
+    await page.clock.setFixedTime(FROZEN_TIME);
     await page.goto(`${BASE_URL}/settings`);
     await page.getByText("Receiver auth").waitFor(); // form + auth section hydrated
     await settleFonts(page);
