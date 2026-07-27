@@ -1,6 +1,9 @@
 # --- Dependencies ---
 node_modules
 
+# --- Generated marketing screenshots (pnpm screenshots) ---
+/docs/screenshots
+
 # --- Frontend build / SvelteKit ---
 /.svelte-kit
 /build
