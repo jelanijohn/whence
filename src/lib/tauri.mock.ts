@@ -162,10 +162,14 @@ const settings: Settings = {
   alwaysPresent: false,
 };
 
+// Neutral placeholder username — these paths render in the settings screenshots,
+// so no real account name belongs here.
+const MOCK_DATA_DIR = "/home/user/.local/share/com.jelanijohn.whence";
+
 function receiverAuth(token: string): ReceiverAuth {
   return {
     token,
-    tokenPath: "/home/jelani/.local/share/com.jelanijohn.whence/receiver.token",
+    tokenPath: `${MOCK_DATA_DIR}/receiver.token`,
     denials: 0,
   };
 }
@@ -191,7 +195,7 @@ function respond(cmd: string, args?: Record<string, unknown>): unknown {
     case "rotate_receiver_token":
       return receiverAuth("4d8b2f6a1e9c7305b6d4f2a0c8e13b57");
     case "get_browser_mapping_path":
-      return "/home/jelani/.local/share/com.jelanijohn.whence/browser_mapping.toml";
+      return `${MOCK_DATA_DIR}/browser_mapping.toml`;
     case "focus_source":
     case "open_settings":
     case "install_claude_hooks":
