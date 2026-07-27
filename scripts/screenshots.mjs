@@ -63,9 +63,13 @@ async function settleFonts(page) {
   await page.waitForTimeout(250);
 }
 
-async function captureBothThemes(page, name) {
+// Dark variant: flip the page's real "Dark mode" switch when it has one (its
+// live-preview drives the `dark` class, and the knob renders ON — keeping the
+// shot self-consistent); pages without a switch get the class injected directly.
+async function captureBothThemes(page, name, goDark = null) {
   await page.screenshot({ path: `${OUT_DIR}${name}-light.png`, omitBackground: true });
-  await page.evaluate(() => document.documentElement.classList.add("dark"));
+  if (goDark) await goDark();
+  else await page.evaluate(() => document.documentElement.classList.add("dark"));
   await page.waitForTimeout(100);
   await page.screenshot({ path: `${OUT_DIR}${name}-dark.png`, omitBackground: true });
 }
@@ -120,7 +124,14 @@ async function main() {
     await page.goto(`${BASE_URL}/settings`);
     await page.getByText("Receiver auth").waitFor(); // form + auth section hydrated
     await settleFonts(page);
-    await captureBothThemes(page, "settings");
+    await captureBothThemes(page, "settings", async () => {
+      await page.getByRole("switch", { name: "Dark mode" }).click();
+      // Save and wait out the "Saved" flash (1.8s) so the footer reads settled,
+      // not mid-edit — the mock echoes the settings back, so Save just works.
+      await page.getByRole("button", { name: "Save" }).click();
+      await page.getByText("Saved", { exact: true }).waitFor();
+      await page.getByText("Saved", { exact: true }).waitFor({ state: "hidden" });
+    });
     await page.close();
 
     console.log(`Wrote 8 screenshots to ${OUT_DIR}`);
