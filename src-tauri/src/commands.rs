@@ -230,9 +230,11 @@ pub fn set_settings(
 
 /// Open the settings popup, or focus it if already open. Settings live in their
 /// own decorated window (label "settings", route /settings) so the widget stays
-/// compact.
+/// compact. `async` is load-bearing: on Windows, building a webview from a
+/// synchronous command deadlocks WebView2 init (wry#583) — the window opens
+/// blank and won't even close.
 #[tauri::command]
-pub fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.unminimize();
         let _ = win.show();
