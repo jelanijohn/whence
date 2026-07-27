@@ -18,9 +18,13 @@ export async function startFocus(): Promise<void> {
   } catch {
     // Backend not up yet (e.g. `vite dev` without Tauri) — stay on the default.
   }
-  unlisten = await onFocus((snap) => {
-    focus.snapshot = snap;
-  });
+  try {
+    unlisten = await onFocus((snap) => {
+      focus.snapshot = snap;
+    });
+  } catch {
+    // No event API either — the snapshot just stays at its hydrated value.
+  }
 }
 
 export function stopFocus(): void {
