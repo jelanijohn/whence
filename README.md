@@ -1,19 +1,26 @@
 # Whence
 
 An ambient focus widget and **local attribution sensor**. Whence infers which
-project you're working on from your AI-tool activity, shows it in a small
-always-on-top widget, and writes attribution labels into NeuroSkill so the EEG
-data downstream knows *what* you were deep on — not just *how* deep.
+project you're working on from your LLM-tool activity, shows it in a small
+(optionally) always-on-top widget. 
+
+Multiple projects? Multiple prompts? Status at a glance and a timeline of where your actual focus lies. 
+
+### NeuroSkill
+
+Whence writes attribution labels into NeuroSkill so the EEG data downstream knows *what* you were deep on — not just *how* deep.
+
 
 NeuroSkill measures focus *intensity*; Whence measures focus *attribution*. It
 is a producer and a peer to NeuroSkill, not a consumer. The full design lives
 in [`whence-spec.md`](whence-spec.md); this README is the short version.
 
-The core constraint is **attribution without surveillance**:
+### Core constraints
+_Attribution without surveillance._
 
 - Reads the work artifacts you already produce — prompts, cwd, session
   lifecycle. Never which window is foregrounded.
-- Never interrupts to ask "what are you doing?".
+- Never interrupts to ask "what are you doing?"
 - Diagnostic, never evaluative — no "you switched 9 times".
 - Local-first: no backend, no cloud, no accounts. The only credential is a
   per-install token its own loopback receivers require, so other local
@@ -29,26 +36,27 @@ Adapters normalize each surface's signal into `WorkEvent`s. The **segmentation
 engine** debounces them into focus *blocks* — a 30-second glance at another
 repo is not a context switch. Each confirmed block drives the widget, a
 NeuroSkill label, and the local JSONL timeline. Three rules carry most of the
-design (spec §7 has the full model):
+design:
 
-- **Trust tiers.** *You acting* (a prompt, a session start) switches focus
-  immediately and marks the block `present`. *Claude working on its own* only
-  builds a switch candidate once you've gone quiet and the block reads
-  `running`. *Weak hints* below `corroborator_confidence_cutoff` (terminal
-  cwd) only reinforce the current block — except that a `running` block drops
-  on a stray hint pointing elsewhere. The widget shows `· present` vs
-  `· running` so it never implies your attention when only Claude's is on the
-  work.
-- **Status ≠ focus.** `active` / `awaiting_input` / `idle` surfaces to the
-  widget immediately and never moves a block boundary.
+- **Trust tiers.** `Present` vs `Running`
+  - *You acting* (a prompt, a session start) switches focus immediately and marks the block `present`. 
+  - *Claude working on its own* only
+    builds a switch candidate once you've gone quiet and the block reads
+    `running`. 
+  - *Weak hints* below `corroborator_confidence_cutoff` (terminal
+    cwd) only reinforce the current block and a `running` block drops
+    on a stray hint pointing elsewhere. 
+  - The widget shows `present` vs `running` so it never implies your attention when only an LLM is on the
+    work.
+- **Status ≠ focus.** `active` / `awaiting_input` / `idle` are shown for your convenience. It moves a block boundary.
 - **One focus, many rows.** The widget is a roster of every live project —
   each row expandable to its concurrent sources (sessions, tabs, terminals) —
   but only the single focused project is attributed, so persisted blocks never
   overlap.
 
-The focused row also carries a **context string** — `git branch · last commit`,
-or opt-in prompt/title snippets (display-only, never labeled) — see
-[`docs/context-strings.md`](docs/context-strings.md).
+The focused row also carries a **context string** 
+- Git status `git branch · last commit` OR opt-in `prompt/title snippet`
+- display-only, never labeled) — see [`docs/context-strings.md`](docs/context-strings.md).
 
 ## Surfaces
 
@@ -84,7 +92,7 @@ naming). Resolution: `project_aliases` override → basename of the transcript's
 first `cwd` line (lossless) → dir-name fallback. Every surface shares one
 `slugify`, so a `~/Projects/whence` checkout and a "Whence" browser project
 converge with no merge step. Claude Code managed-worktree paths collapse to
-their repo. Spec §6 has the full ladder.
+their repo. 
 
 ## NeuroSkill
 
@@ -100,7 +108,7 @@ write path as a header dot — `connected` / `unauthorized` / `unreachable` /
 
 The optional EEG read-back (`--features eeg-readback`) is the one *read*:
 strictly `mode=ro&immutable=1` against NeuroSkill's `activity.sqlite`, powering
-the widget's intensity meter. Spec §8 has the details.
+the widget's intensity meter. 
 
 ## Develop
 
