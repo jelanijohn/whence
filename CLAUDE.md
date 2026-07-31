@@ -133,6 +133,14 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
 * **Status vs focus (§7):** status (`active`/`awaiting_input`/`idle`) surfaces
   *immediately* to the widget and never moves a block boundary; focus switches go
   through the debounce. Both live in `segment.rs`.
+* **Extension distribution:** the browser extension ships **unlisted via the
+  Chrome Web Store** (`docs/extension-distribution.md`;
+  `scripts/package-extension.sh` builds the zip). Once added, the `key` in
+  `extension/manifest.json` is the pinned public key and must not be regenerated.
+  Never add `tabs` or `<all_urls>`; the §9 tripwires in `adapters/browser.rs` pin
+  the manifest invariants, and the extension↔daemon wire protocol is the §6
+  handshake (`WHENCE_PROTOCOL` ↔ `browser::PROTOCOL`, bumped only on breaking
+  changes; the extension *version* bumps with any 18452 payload-shape change).
 
 ## Plugins
 

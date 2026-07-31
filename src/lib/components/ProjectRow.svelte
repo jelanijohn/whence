@@ -1,12 +1,11 @@
 <script lang="ts">
   import type { ContextString, ProjectSnapshot, SourceSnapshot } from "$lib/types";
-  import BrandMark from "./BrandMark.svelte";
   import StatusDot from "./StatusDot.svelte";
   import BlockTimer from "./BlockTimer.svelte";
   import SourceRow from "./SourceRow.svelte";
 
-  // One project row in the roster (§9): glyph (active only) · project · presence ·
-  // status · state timer · expand chevron. The active/focused project is full-strength;
+  // One project row in the roster (§9): project · presence · status · state timer ·
+  // expand chevron. The active/focused project is bold and full-strength;
   // the rest are dimmed so the eye lands on what you're actually deep on without hiding
   // what else is running or waiting on you. Expanding reveals the project's live sources.
   let {
@@ -41,12 +40,6 @@
     style="opacity: {project.active ? 1 : 0.55};"
     title={project.project}
   >
-    <!-- Glyph marks the focus project; others get a same-width spacer so names align. -->
-    {#if project.active}
-      <BrandMark size={16} />
-    {:else}
-      <span class="inline-block shrink-0" style="width: 16px;"></span>
-    {/if}
     <span
       class="truncate"
       class:font-semibold={project.active}
@@ -78,12 +71,11 @@
 
   <!-- Context string (docs/context-strings.md §6): a muted secondary line under the
        project name — what you were doing there, to jog memory. Indented to align
-       with the name (12px pad + 16px glyph + 8px gap). Display-only; absent when
-       nothing resolved. -->
+       with the name (12px row pad). Display-only; absent when nothing resolved. -->
   {#if context}
     <div
       class="truncate"
-      style="padding: 0 12px 2px 36px; color: var(--fg3); font-size: 11px; line-height: 14px;"
+      style="padding: 0 12px 2px 12px; color: var(--fg3); font-size: 11px; line-height: 14px;"
       title={context.text}
     >
       {context.text}

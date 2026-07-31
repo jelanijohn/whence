@@ -234,7 +234,9 @@ The first **originating-capable** surface beyond Claude Code: it
 self-attributes from the provider's *own* project identity, so it can mint a
 project rather than merely corroborate one.
 
-A first-party MV3 browser extension (`extension/`, loaded unpacked) reads only
+A first-party MV3 browser extension (`extension/`, shipped unlisted via the
+Chrome Web Store with a load-unpacked zip as fallback — see
+`docs/extension-distribution.md`) reads only
 the project-scoped URL and the provider's project id + name — a self-declared
 marker, never chat content or which tab is focused — and POSTs them to a
 loopback `tiny_http` listener (default `127.0.0.1:18452`, override via

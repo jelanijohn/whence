@@ -13,6 +13,13 @@ const WHENCE_ENDPOINT = "http://127.0.0.1:18452/browser";
 const WHENCE_RAISE_ENDPOINT = "http://127.0.0.1:18452/raise";
 const WHENCE_DEBUG = false; // flip on to trace relaying in the service-worker console
 
+// The 18452 wire-format generation this extension speaks, stamped (with the manifest
+// version) onto every observation so the daemon can surface a stale-extension
+// diagnostic in Settings (docs/extension-distribution.md §6). Bumped only on
+// *breaking* wire changes — additive fields ride the manifest version alone.
+const WHENCE_PROTOCOL = 1;
+const EXT_VERSION = chrome.runtime.getManifest().version;
+
 // --- Receiver auth ------------------------------------------------------------------
 // Whence's loopback receiver is bearer-gated: every request must carry the token the
 // user pasted into this extension's options page (widget Settings → Receiver auth).
@@ -60,8 +67,9 @@ const PROVIDER_GLOBS = [
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== "whence:observation") return;
   // The title-capture gate: unless Whence opted in, the title never leaves the
-  // browser. Shallow copy — the content script's payload is otherwise relayed as-is.
-  const payload = { ...msg.payload };
+  // browser. Shallow copy — the content script's payload is otherwise relayed as-is
+  // (plus the protocol/version handshake stamp).
+  const payload = { ...msg.payload, protocol: WHENCE_PROTOCOL, version: EXT_VERSION };
   if (!captureTitles) delete payload.conversation_title;
   // Return `true` and call sendResponse so the message channel stays open until the
   // fetch settles — this keeps the MV3 service worker alive long enough to finish the
