@@ -97,7 +97,8 @@ their repo.
 ## NeuroSkill
 
 Whence also acts as an **attribution sensor**: it writes project labels into
-NeuroSkill so the EEG data downstream knows *what* you were deep on — not
+[NeuroSkill](https://github.com/NeuroSkill-com/skill) so the EEG data
+downstream knows *what* you were deep on — not
 just *how* deep — and exposes its timeline for WAID ingestion
 ([`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md)). The
 three streams join downstream: WAID briefs carry intention, the Whence
