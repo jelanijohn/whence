@@ -26,6 +26,7 @@
     neuroskillEndpoint: string;
     neuroskillTokenPath: string;
     neuroskillDataDir: string;
+    eegReadbackEnabled: boolean;
     claudeDir: string;
     ollamaEnabled: boolean;
     ollamaEndpoint: string;
@@ -75,6 +76,7 @@
       neuroskillEndpoint: s.neuroskillEndpoint ?? "",
       neuroskillTokenPath: s.neuroskillTokenPath ?? "",
       neuroskillDataDir: s.neuroskillDataDir ?? "",
+      eegReadbackEnabled: s.eegReadbackEnabled,
       claudeDir: s.claudeDir ?? "",
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? "",
@@ -118,6 +120,7 @@
       neuroskillEndpoint: d.neuroskillEndpoint.trim() || null,
       neuroskillTokenPath: d.neuroskillTokenPath.trim() || null,
       neuroskillDataDir: d.neuroskillDataDir.trim() || null,
+      eegReadbackEnabled: d.eegReadbackEnabled,
       claudeDir: d.claudeDir.trim() || null,
       ollamaEnabled: d.ollamaEnabled,
       ollamaEndpoint: d.ollamaEndpoint.trim() || null,
@@ -149,6 +152,7 @@
       neuroskillEndpoint: s.neuroskillEndpoint ?? null,
       neuroskillTokenPath: s.neuroskillTokenPath ?? null,
       neuroskillDataDir: s.neuroskillDataDir ?? null,
+      eegReadbackEnabled: s.eegReadbackEnabled,
       claudeDir: s.claudeDir ?? null,
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? null,
@@ -518,17 +522,27 @@
           />
         </label>
       {/if}
-      <!-- Data dir powers the read-only intensity meter, independent of the label
-           write path — so it stays visible regardless of the toggle. -->
-      <label class="flex flex-col gap-1">
-        <span style="color: var(--fg2); font-size: 12px;">Data dir override</span>
-        <input
-          class="wn-input"
-          type="text"
-          placeholder="activity.sqlite folder — auto (intensity meter)"
-          bind:value={draft.neuroskillDataDir}
-        />
-      </label>
+      <!-- EEG read-back — independent of the label write path (that's a write,
+           this is the one read). Opt-in like every sensor surface. -->
+      <div class="flex items-center justify-between">
+        <span style="color: var(--fg-body); font-size: 13px;">EEG intensity meter</span>
+        <Toggle bind:checked={draft.eegReadbackEnabled} label="EEG intensity meter" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Shows a small focus meter in the header, read back from NeuroSkill's EEG
+        store. Read-only — Whence never writes anything but the session label.
+      </p>
+      {#if draft.eegReadbackEnabled}
+        <label class="flex flex-col gap-1">
+          <span style="color: var(--fg2); font-size: 12px;">Data dir override</span>
+          <input
+            class="wn-input"
+            type="text"
+            placeholder="activity.sqlite folder — auto-resolve (native → WSL2 host)"
+            bind:value={draft.neuroskillDataDir}
+          />
+        </label>
+      {/if}
     </div>
 
     <!-- Ollama -->

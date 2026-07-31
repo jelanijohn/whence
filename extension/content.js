@@ -202,6 +202,9 @@
     try {
       keepalivePort = chrome.runtime.connect({ name: "whence-keepalive" });
       keepalivePort.onDisconnect.addListener(() => {
+        // Touch lastError so a bfcache-severed port doesn't log "Unchecked
+        // runtime.lastError" — expected on navigation, and the interval reconnects.
+        void chrome.runtime.lastError;
         keepalivePort = null;
       });
     } catch (_) {

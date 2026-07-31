@@ -36,6 +36,14 @@ pub struct Settings {
     /// path, which uses the token path above.
     #[serde(default)]
     pub neuroskill_data_dir: Option<String>,
+    /// Show the header EEG intensity meter, read back from NeuroSkill's
+    /// `activity.sqlite`. **Opt-in, default off** — it's the one place Whence
+    /// reads a biosignal, so it stays explicit even though the read is scoped
+    /// read-only (`mode=ro&immutable=1`; principle #5). Independent of
+    /// `neuroskill_enabled` (the label *write* path). Needs a build with the
+    /// `eeg-readback` cargo feature (on by default).
+    #[serde(default)]
+    pub eeg_readback_enabled: bool,
     /// Override the Claude Code config dir — the `.claude` folder holding
     /// `projects/` (transcripts) and `settings.json` (where hooks install).
     /// `None` = auto-resolve: the native home (`$HOME`/`%USERPROFILE%`), then on
@@ -197,6 +205,7 @@ impl Default for Settings {
             neuroskill_endpoint: None,
             neuroskill_token_path: None,
             neuroskill_data_dir: None,
+            eeg_readback_enabled: false,
             claude_dir: None,
             project_aliases: HashMap::new(),
             hook_listen_addr_override: None,

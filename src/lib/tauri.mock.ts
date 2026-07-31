@@ -133,12 +133,16 @@ const todayBlocks: FocusBlock[] = [
 
 // Mirrors `impl Default for Settings` in src-tauri/src/settings.rs, camelCase
 // per the serde rename — so the settings window screenshots show real defaults.
+// One deliberate divergence: `eegReadbackEnabled` (noted inline).
 const settings: Settings = {
   autostart: false,
   neuroskillEnabled: true,
   neuroskillEndpoint: null,
   neuroskillTokenPath: null,
   neuroskillDataDir: null,
+  // Rust defaults this off; the mock turns it on so roster screenshots show the
+  // meter. get_focus_intensity respects it, so toggling works in dev:mock too.
+  eegReadbackEnabled: true,
   claudeDir: null,
   projectAliases: {},
   hookListenAddrOverride: null,
@@ -182,14 +186,17 @@ function respond(cmd: string, args?: Record<string, unknown>): unknown {
     case "get_today_blocks":
       return todayBlocks;
     case "get_focus_intensity":
-      return 72;
+      // Gated like the real command: null hides the meter when the toggle is off.
+      return settings.eegReadbackEnabled ? 72 : null;
     case "get_neuroskill_status":
       return "connected" satisfies NeuroskillStatus;
     case "get_settings":
       return settings;
     case "set_settings":
-      // Echo back like the real command, so Save in the settings window works.
-      return args?.settings ?? settings;
+      // Persist + echo back like the real command, so Save in the settings
+      // window works and setting-gated responses (the intensity meter) follow.
+      if (args?.settings) Object.assign(settings, args.settings);
+      return settings;
     case "get_receiver_auth":
       return receiverAuth("9f3a1c8e2b7d4f60a5c3e1d9b8f2a604");
     case "rotate_receiver_token":
