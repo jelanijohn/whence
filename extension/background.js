@@ -158,6 +158,9 @@ function startPolling() {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "whence-keepalive") return;
   port.onMessage.addListener(() => {}); // each ping resets the idle timer
+  // Touch lastError on disconnect (bfcache severs the port on navigation) so the
+  // service-worker console doesn't log "Unchecked runtime.lastError".
+  port.onDisconnect.addListener(() => void chrome.runtime.lastError);
   startPolling();
 });
 
