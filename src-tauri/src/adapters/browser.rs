@@ -938,16 +938,26 @@ urls                  = ["https://claude.ai/project/proj_abc"]
         // Both endpoint constants stay on 127.0.0.1; there is no configurable host
         // (docs/extension-distribution.md §3.3).
         let bg = std::fs::read_to_string(extension_dir().join("background.js")).unwrap();
-        let endpoints: Vec<&str> = bg.lines().filter(|l| l.contains("_ENDPOINT = ")).collect();
+        // Match the declarations, not their formatting: a `const` whose *declared
+        // name* ends in `_ENDPOINT`, however a formatter spaces the `=` — the
+        // tripwire pins the loopback host, not the code style.
+        let endpoints: Vec<(&str, &str)> = bg
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| {
+                let (name, value) = l.strip_prefix("const ")?.split_once('=')?;
+                name.trim().ends_with("_ENDPOINT").then(|| (l, value.trim()))
+            })
+            .collect();
         assert_eq!(
             endpoints.len(),
             2,
             "expected exactly the two endpoint constants in background.js — \
              docs/extension-distribution.md §3.3"
         );
-        for line in endpoints {
+        for (line, value) in endpoints {
             assert!(
-                line.contains("\"http://127.0.0.1:"),
+                value.starts_with("\"http://127.0.0.1:"),
                 "endpoint is not loopback: {line:?} — docs/extension-distribution.md §3.3"
             );
         }
@@ -1001,11 +1011,15 @@ urls                  = ["https://claude.ai/project/proj_abc"]
         // The in-repo pair must agree: a runtime mismatch between *shipped*
         // versions is the §6 diagnostic's job, but inside one commit it's a bug.
         let bg = std::fs::read_to_string(extension_dir().join("background.js")).unwrap();
+        // Whitespace-tolerant like the endpoint tripwire: find the declaration,
+        // split on `=`, parse the value.
         let ext_protocol: u32 = bg
             .lines()
-            .find_map(|l| l.trim().strip_prefix("const WHENCE_PROTOCOL = "))
-            .and_then(|v| v.trim_end_matches(';').parse().ok())
-            .expect("background.js declares const WHENCE_PROTOCOL = <int>; — \
+            .map(str::trim)
+            .find(|l| l.starts_with("const WHENCE_PROTOCOL"))
+            .and_then(|l| l.split_once('='))
+            .and_then(|(_, v)| v.trim().trim_end_matches(';').parse().ok())
+            .expect("background.js declares const WHENCE_PROTOCOL = <int> — \
                      docs/extension-distribution.md §6");
         assert_eq!(
             ext_protocol, PROTOCOL,
