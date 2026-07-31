@@ -1,10 +1,11 @@
 # Whence — Working Guidance for Claude Code
 
-Whence is an **ambient focus widget + local attribution sensor**. It infers which
-project you're working on from your AI-tool activity, shows it in a small
-always-on-top widget, and writes attribution labels into NeuroSkill so EEG data
-downstream knows *what* you were deep on. It is a **producer, a peer to
-NeuroSkill** — not a consumer. See `whence-spec.md` for the full design.
+Whence is an **ambient status widget for local AI work** — a small always-on-top
+roster of live AI work surfaces (Claude Code sessions, browser LLM chats, Ollama
+models, terminals), grouped by project — that *also* runs an attribution
+pipeline: it infers which project you're focused on, writes labels into
+NeuroSkill, and keeps a local timeline that WAID ingests. See `whence-spec.md`
+for the full design (§1 addendum records the 2026-07 identity re-center).
 
 ## Commands
 
@@ -162,14 +163,18 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
   Ollama liveness, optional terminal cwd, EEG read-back intensity meter, settings
   UI — all built (Ollama/terminal opt-in, default OFF). NeuroSkill connection-health
   indicator added as a bonus.
-* **v2:** Who Am I inbox candidates; WAID intention-vs-reality.
+* **v2:** WAID timeline ingestion (Whence-side contract:
+  `docs/waid-ingestion-contract.md`; the intention-vs-reality view is WAID-repo
+  work) + surface coverage expansion (ChatGPT `/codex`, Jupyter, Warp Agent,
+  blind-spot counter). Deferred: Who Am I inbox candidates.
 * **v2 (optional):** thread an aggregated semantic `detail` summary into
-  `FocusBlock` so a Who Am I connector ingesting `timeline.jsonl` can draft *what*
-  you did, not just *how long* (the block carries time-attribution today, but
-  `WorkEvent.detail` is dropped at block close). Touches `engine/segment.rs` (carry
-  detail through the open block), `engine/timeline.rs` (schema), `src/lib/types.ts`
-  (keep TS in sync). Ingestion contract: Who Am I reads `<app_data_dir>/timeline.jsonl`
-  directly; dedupe on `(project, start)`.
+  `FocusBlock` so WAID's ingest can draft *what* you did, not just *how long*
+  (the block carries time-attribution today, but `WorkEvent.detail` is dropped
+  at block close). Touches `engine/segment.rs` (carry detail through the open
+  block), `engine/timeline.rs` (schema), `src/lib/types.ts` (keep TS in sync).
+  Ingestion contract: `docs/waid-ingestion-contract.md` — WAID reads
+  `<app_data_dir>/timeline.jsonl` (and `corrections.jsonl` once A3 lands —
+  resolve latest-wins, skip dropped); dedupe on `(project, start)`.
 
 ## Style
 

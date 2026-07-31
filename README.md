@@ -2,23 +2,21 @@
 
 View your running local LLM processes, grouped by project.
 
-An ambient focus widget and **local attribution sensor**. Whence infers which
-project you're working on from your LLM-tool activity, shows it in a small
- always-on-top (optionally) widget. 
+A small always-on-top roster of every live AI work surface — Claude Code
+sessions, browser LLM chats, Ollama models, terminals — grouped by project,
+showing what's active, what's awaiting your input, and where your focus
+actually sits.
 
 Multiple projects? Multiple prompts? Status at a glance and a timeline of where your actual focus lies. 
 
-### NeuroSkill
-
-Whence writes attribution labels into NeuroSkill so the EEG data downstream knows *what* you were deep on — not just *how* deep.
-
-
-NeuroSkill measures focus *intensity*; Whence measures focus *attribution*. It
-is a producer and a peer to NeuroSkill, not a consumer. The full design lives
-in [`whence-spec.md`](whence-spec.md); this README is the short version.
+The full design lives in [`whence-spec.md`](whence-spec.md); this README is
+the short version.
 
 ### Core constraints
-_Attribution without surveillance._
+_Attribution without surveillance — which is also why the widget works:
+semantic work events are what make per-session `awaiting_input` and
+per-project rosters possible at all. Window scraping knows which rectangle is
+on top, not which of four sessions needs a reply._
 
 - Reads the work artifacts you already produce — prompts, cwd, session
   lifecycle. Never which window is foregrounded.
@@ -98,6 +96,13 @@ their repo.
 
 ## NeuroSkill
 
+Whence also acts as an **attribution sensor**: it writes project labels into
+NeuroSkill so the EEG data downstream knows *what* you were deep on — not
+just *how* deep — and exposes its timeline for WAID ingestion
+([`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md)). The
+three streams join downstream: WAID briefs carry intention, the Whence
+timeline carries attributed reality, NeuroSkill carries depth.
+
 On block open/close Whence writes `Whence:project=<slug>:start|end` over the
 daemon's HTTP API (`127.0.0.1:18444`) — namespaced so WAID's manual `waid:`
 labels win on conflict. **The label is the only write.**
@@ -172,9 +177,14 @@ v0–v1.5 shipped: transcript watcher, segmentation engine (trust tiers,
 present/running, state registry), roster widget with settings window and
 appearance controls, JSONL timeline, NeuroSkill labels + health dot, hooks
 receiver, Ollama liveness, terminal corroborator, browser extension, receiver
-auth, context strings, EEG intensity meter. Planned: debounce calibration on
-real data, then Who Am I inbox candidates and WAID intention-vs-reality (spec
-§13).
+auth, context strings, EEG intensity meter. Planned, in order: surface
+coverage (provider-table expansion + a ChatGPT `/codex` prefix, a Jupyter
+kernel adapter, a Warp Agent adapter, a blind-spot counter); WAID timeline
+ingestion (the Whence-side contract ships in
+[`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md) — the
+intention-vs-reality view is WAID-repo work); timeline corrections (A3) and
+debounce calibration (A2) as data hygiene for the WAID view; and, deferred,
+Who Am I inbox candidates (spec §13).
 
 By design Whence does **not**: scrape OS window/app focus, score or grade your
 focus, touch the phone, or auto-write to anyone's record (it proposes; humans

@@ -41,6 +41,17 @@ cross-cutting data sidesteps that wall for the desktop trio. (Honest limit:
 Whence lives where you work — the desktop. Phone activity in What's Next? stays
 out of scope and remains its own separate question.)
 
+**Addendum (2026-07-31) — identity re-center.** The framing above is the
+founding record and stays as written. In practice the widget became the product
+and attribution became its feature: Whence is the local-LLM status widget
+first, attribution sensor second. The "producer, not a consumer" line no longer
+holds (the EEG read-back is a NeuroSkill read), and the sensor's first real
+consumer is **WAID**, not Who Am I — briefs (intention) × timeline (attributed
+reality) × EEG (depth) join in WAID's macro view. Contract:
+[`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md); decision:
+§14 · 9. The §2–§3 constraints are unaffected — they proved to be *why* the
+status widget works.
+
 ---
 
 ## 2. The problem
@@ -639,6 +650,8 @@ ingest **inbox with a promote gate**. Whence drafts candidates like *"Spent 3h
 on waid — wiring the Figma connector"* (project from the block, semantic detail
 from prompt content) into that inbox. Nothing reaches the record without your
 explicit promote. Whence sees *all* desktop work, not just timed task sessions.
+*Deferred (2026-07-31): the timeline's first real consumer is WAID (§14 · 9);
+this pipe stays open but unscheduled.*
 * **WAID (intention vs. reality).** WAID knows your *active* brief; Whence
 knows where the day *actually* went. Surface the delta — *"waid is your active
 brief, but today went to whatsnext"* — strictly diagnostic. Design spec:
@@ -723,16 +736,18 @@ timeline. Remaining: debounce calibration on real data.
 intensity meter; settings UI; receiver auth (§5.6); NeuroSkill
 connection-health dot; browser LLM adapter + extension (§5.5); context strings
 (§9); settings popup window + appearance controls.
-* **v2 — payoff pipes.** Who Am I inbox candidates; WAID intention-vs-reality
-(§10).
+* **v2 — payoff pipes.** WAID timeline ingestion + intention-vs-reality (§10;
+contract in [`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md));
+surface coverage expansion. Who Am I inbox candidates deferred.
 * **v2 (optional) — richer candidates.** Thread an aggregated semantic `detail`
-summary into `FocusBlock` so a Who Am I connector ingesting `timeline.jsonl`
-can draft *what* you did, not just *how long*. The block carries
-time-attribution today (`project`, `start`/`end`, `eventCount`,
-`meanConfidence`), but `WorkEvent.detail` is dropped at block close. Touches
-`engine/segment.rs` (carry detail through the open block), `engine/timeline.rs`
-(schema), `src/lib/types.ts` (sync). Ingestion contract: Who Am I reads
-`<app_data_dir>/timeline.jsonl` directly and dedupes on `(project, start)`.
+summary into `FocusBlock` so WAID's ingest can draft *what* you did, not just
+*how long*. The block carries time-attribution today (`project`, `start`/`end`,
+`eventCount`, `meanConfidence`), but `WorkEvent.detail` is dropped at block
+close. Touches `engine/segment.rs` (carry detail through the open block),
+`engine/timeline.rs` (schema), `src/lib/types.ts` (sync). Ingestion contract:
+[`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md) — WAID
+reads `<app_data_dir>/timeline.jsonl` (and `corrections.jsonl` once A3 lands —
+resolve latest-wins, skip dropped) and dedupes on `(project, start)`.
 
 ---
 
@@ -757,6 +772,14 @@ off) gates the read, so enabling the meter no longer needs a rebuild (§8).
 registry is a read-only projection (§7, §9).
 8. **Daily-history placement** — **resolved:** the expanded view's
 today's-blocks timeline (§9), not the row-expand action (which opens sources).
+9. **Product identity & first consumer (2026-07-31)** — **resolved:**
+widget-first — Whence is the local-LLM status widget; attribution demotes from
+thesis to feature (§1 addendum). The timeline's first real consumer is WAID
+([`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md)); Who Am
+I inbox candidates deferred. The §2–§3 non-surveillance constraints are
+retained verbatim — they are load-bearing for the widget identity, not just
+the sensor's. Narrative:
+[`docs/case-study-identity-pivot.md`](docs/case-study-identity-pivot.md).
 
 ---
 
