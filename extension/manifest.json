@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Whence: Browser LLM sensor",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Feeds browser AI chat project identity into the local Whence widget. Reads the self-declared project only, never chat content.",
   "homepage_url": "https://github.com/jelanijohn/whence",
   "icons": {

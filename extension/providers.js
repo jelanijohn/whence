@@ -72,16 +72,23 @@ var WHENCE_PROVIDERS = [
     // surface (chat) and the fallback for any non-/design claude.ai page.
     hostPattern: /(^|\.)claude\.ai$/i,
 
-    // The CURRENT chat's project link lives in the page <header> (a breadcrumb back to
-    // the project), carrying BOTH the stable id (in its href) and the readable name
-    // (its text). It MUST be scoped to the header: the sidebar <nav> lists *every*
-    // project, so an unscoped `a[href*="/project/"]` grabs whichever project is first
-    // in the sidebar, not the one this chat belongs to.
-    //   <header> … <a href="/project/{id}">{name}</a> … </header>
-    projectAnchorSelector: 'header a[href*="/project/"]',
+    // The CURRENT chat's project link, carrying BOTH the stable id (in its href) and
+    // the readable name (its text). The 2026-07 claude.ai redesign dropped the page
+    // <header>: the breadcrumb back to the project now sits in the chat-header
+    // container as a `/cowork/project/{id}` link. It MUST stay scoped to that
+    // container — the sidebar lists *every* project as `/cowork/project/` links, so an
+    // unscoped `a[href*="/project/"]` grabs whichever project is first in the sidebar,
+    // not the one this chat belongs to. The old <header>-scoped form is kept as a
+    // fallback for pre-redesign DOM (the two containers never coexist).
+    //   <div data-testid="chat-header"> … <a href="/cowork/project/{id}">{name}</a> …
+    projectAnchorSelector:
+      '[data-testid="chat-header"] a[href*="/project/"], header a[href*="/project/"]',
+    // Unanchored on purpose: keys on the `/project/{id}` segment, so it matches both
+    // the old `/project/{id}` and the redesigned `/cowork/project/{id}` href shapes.
     anchorHrefPattern: /\/project\/([^/?#]+)/,
 
-    // Fallback: the project's own page is /project/{id} — pull the id straight from
+    // Fallback: the project's own page is /project/{id} (or /cowork/project/{id}
+    // post-redesign — the unanchored pattern covers both) — pull the id straight from
     // the URL even when the anchor isn't on the page.
     projectUrlPattern: /\/project\/([^/?#]+)/,
 
@@ -92,9 +99,13 @@ var WHENCE_PROVIDERS = [
     streamingSelector:
       'button[aria-label*="Stop" i], button[aria-label*="stop response" i]',
 
-    // Turn counter: assistant message blocks. Count, don't read — the count is all
-    // the daemon needs (a turn increment = you acted).
-    turnSelector: '[data-testid="assistant-message"], div.font-claude-message',
+    // Turn counter: message blocks. Count, don't read — the count is all the daemon
+    // needs (a turn increment = you acted). The 2026-07 redesign dropped the
+    // assistant-message testid; user messages are the countable unit now — and an
+    // increment lands the moment you SEND, which is the you-acted signal anyway.
+    // The old assistant-message forms are kept for pre-redesign DOM.
+    turnSelector:
+      '[data-testid="user-message"], [data-testid="assistant-message"], div.font-claude-message',
 
     // Conversation title (opt-in context source): document.title minus " - Claude".
     titleStrip: /\s*[-–—|·]\s*Claude\s*$/i,
