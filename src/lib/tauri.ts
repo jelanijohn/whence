@@ -8,6 +8,7 @@ import type {
   Settings,
   NeuroskillStatus,
   ReceiverAuth,
+  BrowserExtensionStatus,
 } from "./types";
 
 export const FOCUS_EVENT = "whence://focus";
@@ -64,6 +65,13 @@ export function getSettings(): Promise<Settings> {
  *  in settings as a hand-editable deep-link. */
 export function getBrowserMappingPath(): Promise<string> {
   return call("get_browser_mapping_path");
+}
+
+/** Last-seen browser-extension handshake (version · protocol · current/outdated/
+ *  newer), or null until the extension has reported this launch. Drives the
+ *  Settings diagnostic line under the browser adapter. */
+export function getBrowserExtensionStatus(): Promise<BrowserExtensionStatus | null> {
+  return call("get_browser_extension_status");
 }
 
 /** Persist settings. Toggling `autostart` registers/unregisters the launch agent. */

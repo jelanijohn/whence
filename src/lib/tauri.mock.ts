@@ -203,6 +203,9 @@ function respond(cmd: string, args?: Record<string, unknown>): unknown {
       return receiverAuth("4d8b2f6a1e9c7305b6d4f2a0c8e13b57");
     case "get_browser_mapping_path":
       return `${MOCK_DATA_DIR}/browser_mapping.toml`;
+    case "get_browser_extension_status":
+      // Null = extension hasn't reported this launch; the diagnostic line hides.
+      return null;
     case "focus_source":
     case "open_settings":
     case "install_claude_hooks":
