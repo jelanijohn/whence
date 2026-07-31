@@ -83,3 +83,22 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # Attach the browser-extension zip (the load-unpacked fallback,
+  # docs/extension-distribution.md §7) to the same draft release. The extension
+  # versions independently of the app — the script names the zip from
+  # extension/manifest.json, so a v0.5.0 app release can legitimately carry
+  # whence-extension-v0.4.0.zip. The Chrome Web Store upload stays manual.
+  package-extension:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Package extension
+        run: ./scripts/package-extension.sh
+
+      - name: Attach to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" whence-extension-v*.zip --clobber
