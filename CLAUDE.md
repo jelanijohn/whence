@@ -13,8 +13,8 @@ pnpm install              # first-time setup
 pnpm tauri dev            # run the widget (frontend + Rust backend)
 pnpm tauri:wsl            # same, with WEBKIT_DISABLE_DMABUF_RENDERER=1 for WSL2
 pnpm check                # svelte-check (frontend types)
-cd src-tauri && cargo test            # engine + adapter + store unit tests
-cd src-tauri && cargo test --features eeg-readback   # include the SQLite read-back
+cd src-tauri && cargo test            # engine + adapter + store unit tests (incl. the SQLite read-back — default feature)
+cd src-tauri && cargo test --no-default-features     # the SQLite-free build still compiles + passes
 ```
 
 The dev server runs on **port 1425** (WAID uses 1420, so both widgets can run at
@@ -54,7 +54,9 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
 * **`src-tauri/src/neuroskill/`** — the write path. `client.rs` fires the `label`
   command over the daemon's **HTTP** API (`POST /`, bearer-token gated), lifted
   from WAID's `neuroskill/client.rs`. `eeg.rs` is the optional read-only
-  intensity read-back (behind the `eeg-readback` feature).
+  intensity read-back — compiled in by default (`eeg-readback` is a default cargo
+  feature; `--no-default-features` drops SQLite) and gated at runtime by the
+  opt-in `eegReadbackEnabled` setting (default off, Settings → NeuroSkill).
   * **Token resolution is WSL2-aware** (`client::resolve_token_path`). Order:
     explicit `neuroskill_token_path` setting → native `<config>/skill/daemon/auth.token`
     if it exists → **WSL2 Windows-host discovery** (walks

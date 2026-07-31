@@ -108,9 +108,10 @@ call time, so rotation needs no restart. A periodic health probe surfaces the
 write path as a header dot — `connected` / `unauthorized` / `unreachable` /
 `disabled` — diagnostic, never blocking.
 
-The optional EEG read-back (`--features eeg-readback`) is the one *read*:
-strictly `mode=ro&immutable=1` against NeuroSkill's `activity.sqlite`, powering
-the widget's intensity meter. 
+The optional EEG read-back is the one *read*: strictly `mode=ro&immutable=1`
+against NeuroSkill's `activity.sqlite`, powering the widget's intensity meter.
+Opt-in at runtime (Settings → NeuroSkill, default off); the `eeg-readback`
+cargo feature is on by default (`--no-default-features` drops SQLite).
 
 ## Develop
 
@@ -128,8 +129,8 @@ pnpm screenshots        # headless screenshot capture (uses mock mode)
 ```
 
 ```bash
-cd src-tauri && cargo test                          # engine + adapter + store tests
-cd src-tauri && cargo test --features eeg-readback  # include the SQLite read-back
+cd src-tauri && cargo test                        # engine + adapter + store tests (incl. the SQLite read-back)
+cd src-tauri && cargo test --no-default-features  # the SQLite-free build still passes
 ```
 
 The dev server runs on **port 1425** (WAID uses 1420, so both widgets can run

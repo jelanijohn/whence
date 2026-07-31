@@ -57,11 +57,13 @@ getrandom = "0.3"
 
 # Optional read-only NeuroSkill EEG read-back for the intensity meter (v1.5
 # polish; the write path is the v1 requirement). `bundled` avoids a system
-# libsqlite dependency. Gated so v1 builds don't pull SQLite unless asked.
+# libsqlite dependency. On by default so the Settings toggle (`eegReadbackEnabled`,
+# opt-in, default off) can gate it at runtime; build with `--no-default-features`
+# to drop SQLite from the binary entirely.
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [features]
-default = []
+default = ["eeg-readback"]
 eeg-readback = ["dep:rusqlite"]
 
 [dev-dependencies]

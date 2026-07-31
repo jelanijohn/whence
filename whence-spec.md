@@ -542,16 +542,21 @@ written this session.
 
 ### Optional read-back (powers the widget's intensity meter)
 
-Behind the `eeg-readback` cargo feature, Whence reads NeuroSkill's EEG back —
-strictly read-only: it opens `activity.sqlite` with `mode=ro&immutable=1` and
+Whence can read NeuroSkill's EEG back — double-gated: the `eeg-readback` cargo
+feature (a *default* feature; `--no-default-features` drops the SQLite
+dependency from the binary) and the runtime `eegReadbackEnabled` setting
+(**opt-in, default off** — it's the one place Whence touches a biosignal, so it
+stays explicit; toggled in Settings → NeuroSkill, where the data-dir override
+reveals under it). Strictly read-only: it opens `activity.sqlite` with
+`mode=ro&immutable=1` and
 issues a single scoped `eeg_timeseries` query (mean `focus` over the last ~2
 minutes, via `get_focus_intensity`). A read-scope guard test in
 `neuroskill/eeg.rs` pins the discipline. The data dir is resolved the same
 WSL2-aware way as the token, but against the daemon's *Local* AppData: explicit
 `neuroskill_data_dir` → native local-data dir →
-`/mnt/<drive>/Users/<user>/AppData/Local/NeuroSkill/activity.sqlite`. When the
-feature is off or no store is found, the command returns nothing and the meter
-hides — it never blocks focus tracking.
+`/mnt/<drive>/Users/<user>/AppData/Local/NeuroSkill/activity.sqlite`. When
+either gate is off or no store is found, the command returns nothing and the
+meter hides — it never blocks focus tracking.
 
 ---
 
@@ -611,7 +616,7 @@ sort, never a ranking or a count of how fragmented your day was (principle 3).
 `get_today_blocks`. Diagnostic only — no "you switched 9 times 😬."
 
 **Intensity meter** — the optional EEG read-back (§8) on the focus row, when
-connected.
+enabled and connected.
 
 **Behaviors:** draggable, remembers position, quiet "unattributed / idle" state
 rather than going blank. Settings open in their own popup window
@@ -654,7 +659,7 @@ own thread; no async server framework), `reqwest` (Ollama poll + the NeuroSkill
 HTTP label write), `toml_edit` (format-preserving browser mapping store),
 `getrandom` (receiver-token minting), `tokio` (runtime; `process` for the
 context-string git spawn — no `net` feature), `serde` / `serde_json`, `chrono`,
-and optionally `rusqlite` (bundled, behind `eeg-readback`).
+and optionally `rusqlite` (bundled, behind the default-on `eeg-readback` feature).
 * **Window:** always-on-top + transparent + borderless (lifted from WAID's
 transparent-window approach), plus a system tray as the only un-hide path.
 * **Data:** JSONL for the focus timeline — one block per line (see the
@@ -745,7 +750,9 @@ manual-wins; two parallel writers, no coupling (§8).
 5. **Ollama attribution** — **resolved:** liveness only, unattributed; it never
 colors a block (§5.2).
 6. **EEG read-back timing** — **resolved:** v1.5 polish, behind the
-`eeg-readback` feature (§8).
+`eeg-readback` feature (§8); later re-resolved as a runtime opt-in — the
+feature compiles in by default and the `eegReadbackEnabled` setting (default
+off) gates the read, so enabling the meter no longer needs a rebuild (§8).
 7. **Widget shape** — **resolved:** one focus block + a roster, additive; the
 registry is a read-only projection (§7, §9).
 8. **Daily-history placement** — **resolved:** the expanded view's

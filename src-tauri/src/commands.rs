@@ -98,18 +98,21 @@ pub fn get_today_blocks(state: State<AppState>) -> Result<Vec<TimelineRecord>, S
 /// Mean EEG focus (0..100) over the last couple of minutes — drives the widget's
 /// optional intensity meter (spec §8 read-back). **Read-only** (principle #5):
 /// resolves NeuroSkill's `activity.sqlite` and issues the single scoped
-/// `eeg_timeseries` SELECT, nothing else. `None` when the `eeg-readback` feature is
-/// off, NeuroSkill's store can't be found, or there are no recent epochs — the
-/// meter simply hides, best-effort like the label write. Never errors.
+/// `eeg_timeseries` SELECT, nothing else. `None` when the `eegReadbackEnabled`
+/// setting (opt-in, default off) or the `eeg-readback` feature is off, NeuroSkill's
+/// store can't be found, or there are no recent epochs — the meter simply hides,
+/// best-effort like the label write. Never errors.
 #[tauri::command]
 pub fn get_focus_intensity(state: State<AppState>) -> Option<f64> {
     #[cfg(feature = "eeg-readback")]
     {
-        let data_dir_override = state
-            .settings
-            .lock()
-            .ok()
-            .and_then(|g| g.neuroskill_data_dir.clone());
+        let (enabled, data_dir_override) = {
+            let g = state.settings.lock().ok()?;
+            (g.eeg_readback_enabled, g.neuroskill_data_dir.clone())
+        };
+        if !enabled {
+            return None;
+        }
         let db = crate::neuroskill::eeg::resolve_activity_db(data_dir_override.as_deref())?;
         let now = chrono::Utc::now().timestamp();
         // Last ~2 minutes of ~5s epochs — "live" without being jumpy.

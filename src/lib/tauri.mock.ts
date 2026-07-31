@@ -139,6 +139,9 @@ const settings: Settings = {
   neuroskillEndpoint: null,
   neuroskillTokenPath: null,
   neuroskillDataDir: null,
+  // Defaults to false like the Rust side; the mock still answers
+  // get_focus_intensity with a value so roster screenshots show the meter.
+  eegReadbackEnabled: false,
   claudeDir: null,
   projectAliases: {},
   hookListenAddrOverride: null,
