@@ -1,8 +1,10 @@
 # Whence
 
+View your running local LLM processes, grouped by project.
+
 An ambient focus widget and **local attribution sensor**. Whence infers which
 project you're working on from your LLM-tool activity, shows it in a small
-(optionally) always-on-top widget. 
+ always-on-top (optionally) widget. 
 
 Multiple projects? Multiple prompts? Status at a glance and a timeline of where your actual focus lies. 
 
