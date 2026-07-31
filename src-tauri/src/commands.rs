@@ -44,6 +44,9 @@ pub struct AppState {
     pub moments: crate::context::SharedMoments,
     /// Denied (401) receiver requests since launch — the Settings diagnostic.
     pub auth_denials: crate::auth::Denials,
+    /// Last-seen browser-extension handshake (docs/extension-distribution.md §6) —
+    /// written by the browser receiver, read by `get_browser_extension_status`.
+    pub browser_extension: crate::adapters::browser::SharedExtensionInfo,
 }
 
 /// Current focus snapshot — every live session (each with its own status + timer),
@@ -148,6 +151,35 @@ pub fn get_browser_mapping_path(state: State<AppState>) -> String {
     crate::adapters::browser_map::mapping_path(&state.data_dir)
         .to_string_lossy()
         .into_owned()
+}
+
+/// Last-seen browser-extension handshake, judged against the daemon's own protocol —
+/// the Settings diagnostic line (docs/extension-distribution.md §6). Diagnostic,
+/// never evaluative or gating: a mismatch degrades to this line, never to a dropped
+/// event or an altered attribution.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserExtensionStatus {
+    /// The extension's manifest version, when it sent one.
+    pub version: Option<String>,
+    /// The wire-format generation the extension speaks.
+    pub protocol: u32,
+    /// `current` / `outdated` (extension behind — update from the Web Store) /
+    /// `newer` (extension ahead of this daemon).
+    pub status: &'static str,
+}
+
+/// `None` until the extension has reported at least once this launch (or the
+/// browser adapter is off) — the panel simply shows nothing.
+#[tauri::command]
+pub fn get_browser_extension_status(state: State<AppState>) -> Option<BrowserExtensionStatus> {
+    let info = state.browser_extension.lock().ok()?.clone()?;
+    let status = match info.protocol.cmp(&crate::adapters::browser::PROTOCOL) {
+        std::cmp::Ordering::Less => "outdated",
+        std::cmp::Ordering::Equal => "current",
+        std::cmp::Ordering::Greater => "newer",
+    };
+    Some(BrowserExtensionStatus { version: info.version, protocol: info.protocol, status })
 }
 
 #[tauri::command]

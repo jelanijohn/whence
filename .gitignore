@@ -4,6 +4,9 @@ node_modules
 # --- Generated marketing screenshots (pnpm screenshots) ---
 /docs/screenshots
 
+# --- Packaged extension (scripts/package-extension.sh) — a build artifact ---
+/whence-extension-v*.zip
+
 # --- Frontend build / SvelteKit ---
 /.svelte-kit
 /build

@@ -6,10 +6,11 @@
     installClaudeHooks,
     uninstallClaudeHooks,
     getBrowserMappingPath,
+    getBrowserExtensionStatus,
     getReceiverAuth,
     rotateReceiverToken,
   } from "$lib/tauri";
-  import type { Settings, ReceiverAuth } from "$lib/types";
+  import type { Settings, ReceiverAuth, BrowserExtensionStatus } from "$lib/types";
   import { neuroskill } from "$lib/stores/neuroskill.svelte";
   import { appearance, clampOpacity, MIN_OPACITY } from "$lib/stores/appearance.svelte";
   import Toggle from "./Toggle.svelte";
@@ -222,6 +223,19 @@
   // browser adapter is on. Best-effort: a failure just hides the path hint.
   let browserMappingPath = $state<string | null>(null);
 
+  // Last-seen extension handshake (docs/extension-distribution.md §6) — the
+  // version/protocol diagnostic under the browser adapter. Null (extension hasn't
+  // reported this launch) just hides the line. Refreshed on the same poll as the
+  // denial counter, so a stale extension shows up while the panel is open.
+  let extStatus = $state<BrowserExtensionStatus | null>(null);
+  const extStatusLabel = $derived(
+    extStatus?.status === "outdated"
+      ? "outdated — update from the Web Store"
+      : extStatus?.status === "newer"
+        ? "newer than this daemon"
+        : "current",
+  );
+
   // Receiver auth: the bearer token gating the three loopback receivers, plus the
   // rejected-request counter. Polled while the panel is open so the diagnostic
   // stays live (denials tick up as they happen, not on reopen).
@@ -236,6 +250,11 @@
       receiverAuth = await getReceiverAuth();
     } catch {
       receiverAuth = null; // section hides; not worth an error banner
+    }
+    try {
+      extStatus = await getBrowserExtensionStatus();
+    } catch {
+      extStatus = null; // line hides; same best-effort posture
     }
   }
 
@@ -643,10 +662,22 @@
       </p>
       {#if draft.browserEnabled}
         <p style="color: var(--fg3); font-size: 11px;">
-          Install the extension from <span class="tabular-nums">extension/</span> (load unpacked); it
-          POSTs to <span class="tabular-nums">127.0.0.1:18452/browser</span>. Paste the receiver
+          Install the Whence extension (Chrome Web Store, unlisted — or load
+          <span class="tabular-nums">extension/</span> unpacked); it POSTs to
+          <span class="tabular-nums">127.0.0.1:18452/browser</span>. Paste the receiver
           token (above) into the extension's options page once.
         </p>
+        {#if extStatus}
+          <!-- §6 handshake diagnostic — reports, never scolds; a mismatch never
+               drops an event or moves an attribution. -->
+          <p style="color: var(--fg3); font-size: 11px;">
+            Extension:
+            <span class="tabular-nums" style="color: var(--fg2);"
+              >{extStatus.version ? `v${extStatus.version}` : "unknown version"} · protocol {extStatus.protocol}</span
+            >
+            — {extStatusLabel}
+          </p>
+        {/if}
         {#if browserMappingPath}
           <p style="color: var(--fg3); font-size: 11px;">
             Project mapping (hand-editable):

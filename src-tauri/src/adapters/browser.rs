@@ -50,6 +50,32 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::browser_map::MappingStore;
 use super::{Surface, WorkEvent, WorkKind};
 
+/// The 18452 wire-format generation this daemon speaks — mirrored by the extension's
+/// `WHENCE_PROTOCOL` in `background.js` (docs/extension-distribution.md §6). Bumped
+/// only on *breaking* wire changes; additive fields ride the extension's manifest
+/// version instead (§4.4). Rides the `/raise` response so the extension can see the
+/// daemon's generation; a mismatch is a Settings diagnostic, never a dropped event.
+pub const PROTOCOL: u32 = 1;
+
+/// Last-seen extension identity, recorded off every authenticated observation —
+/// the daemon half of the §6 handshake. Feeds the Settings diagnostic line
+/// (current / outdated / newer); never consulted by attribution.
+#[derive(Debug, Clone)]
+pub struct ExtensionInfo {
+    pub version: Option<String>,
+    pub protocol: u32,
+}
+
+/// Shared handle: written by the receiver thread, read by the Settings command.
+/// `None` until the extension has reported at least once this launch.
+pub type SharedExtensionInfo = Arc<Mutex<Option<ExtensionInfo>>>;
+
+/// The §6 handshake fields of a payload, with the compat default: an extension old
+/// enough not to send `protocol` speaks protocol 1.
+pub fn extension_info_of(p: &BrowserPayload) -> ExtensionInfo {
+    ExtensionInfo { version: p.version.clone(), protocol: p.protocol.unwrap_or(1) }
+}
+
 /// Pending "raise this tab" requests — normalized conversation URLs the widget asked
 /// to surface, drained by the extension's poll (`GET /raise`). Loopback, in-memory,
 /// bounded: a manual navigation affordance, not a log. Shared between a Tauri command
@@ -121,6 +147,13 @@ pub struct BrowserPayload {
     /// the display-only context moment.
     #[serde(default)]
     pub conversation_title: Option<String>,
+    /// The wire-format generation the extension speaks (§6 handshake). Absent →
+    /// protocol 1 (a pre-handshake extension). Diagnostic only — never gates.
+    #[serde(default)]
+    pub protocol: Option<u32>,
+    /// The extension's manifest version — the human half of the diagnostic line.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// The §3 resolution outcome for one payload.
@@ -446,6 +479,7 @@ pub fn serve(
     denials: crate::auth::Denials,
     settings: Arc<Mutex<crate::settings::Settings>>,
     moments: crate::context::SharedMoments,
+    ext_info: SharedExtensionInfo,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(addr)
         .map_err(|e| format!("could not bind browser receiver on {addr}: {e}"))?;
@@ -475,10 +509,12 @@ pub fn serve(
                         .map(|mut q| q.drain(..).collect())
                         .unwrap_or_default();
                     // Piggyback the title-capture setting so the extension gates at
-                    // the source — one widget toggle, no second options-page knob.
+                    // the source — one widget toggle, no second options-page knob —
+                    // and the daemon's protocol so the extension can see a mismatch.
                     let body = serde_json::json!({
                         "raise": urls,
                         "capture_titles": titles_enabled(&settings),
+                        "protocol": PROTOCOL,
                     })
                     .to_string();
                     let hdr = tiny_http::Header::from_bytes(
@@ -493,6 +529,13 @@ pub fn serve(
                 let mut body = String::new();
                 if req.as_reader().read_to_string(&mut body).is_ok() {
                     if let Ok(payload) = serde_json::from_str::<BrowserPayload>(&body) {
+                        // §6 handshake: record who's talking. Every observation
+                        // counts, attributed or not — the diagnostic is about the
+                        // extension, not the chat. Poison skipped: a broken lock
+                        // must never cost an event.
+                        if let Ok(mut g) = ext_info.lock() {
+                            *g = Some(extension_info_of(&payload));
+                        }
                         let now = chrono::Utc::now().to_rfc3339();
                         if let Some(ev) = handle(&payload, &mut store, &mut last_turn, &now) {
                             // Attributed conversation + gate on → its sanitized title
@@ -821,6 +864,154 @@ urls                  = ["https://claude.ai/project/proj_abc"]
         let p: BrowserPayload = serde_json::from_str(json).unwrap();
         assert_eq!(p.url.as_deref(), Some("https://claude.ai/new"));
         assert_eq!(p.streaming, Some(true));
+    }
+
+    #[test]
+    fn handshake_defaults_absent_protocol_to_1() {
+        // A pre-handshake extension sends neither field → protocol 1, no version
+        // (docs/extension-distribution.md §6: "absent field → treat as protocol 1").
+        let p: BrowserPayload = serde_json::from_str(r#"{"url":"https://claude.ai/new"}"#).unwrap();
+        let info = extension_info_of(&p);
+        assert_eq!(info.protocol, 1);
+        assert!(info.version.is_none());
+
+        // A handshaking extension's stamp round-trips.
+        let p: BrowserPayload =
+            serde_json::from_str(r#"{"protocol":2,"version":"0.4.0"}"#).unwrap();
+        let info = extension_info_of(&p);
+        assert_eq!(info.protocol, 2);
+        assert_eq!(info.version.as_deref(), Some("0.4.0"));
+    }
+
+    // --- Tripwires (docs/extension-distribution.md §9, gstack A5 pattern) --------
+    //
+    // The extension package has no test harness of its own, so its release
+    // invariants are pinned here, in the daemon's — the two ship as one sensor.
+    // If one of these fails, the invariant (not the test) is what's being broken.
+
+    fn extension_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../extension")
+    }
+
+    fn manifest() -> serde_json::Value {
+        let path = extension_dir().join("manifest.json");
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
+            .expect("extension/manifest.json must parse")
+    }
+
+    fn host_permissions(m: &serde_json::Value) -> Vec<String> {
+        m["host_permissions"]
+            .as_array()
+            .expect("manifest has host_permissions")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn tripwire_no_broad_permissions() {
+        // Never `<all_urls>`, never `tabs` — tab raising works via host_permissions
+        // alone, and either addition moves the extension to the slow review track
+        // (docs/extension-distribution.md §3.1).
+        let m = manifest();
+        let perms: Vec<&str> =
+            m["permissions"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(
+            perms,
+            ["storage"],
+            "permissions must stay exactly [\"storage\"] — docs/extension-distribution.md §3.1"
+        );
+        assert!(
+            !perms.contains(&"tabs"),
+            "the tabs permission is forbidden — docs/extension-distribution.md §3.1"
+        );
+        for h in host_permissions(&m) {
+            assert!(
+                !h.contains("<all_urls>"),
+                "host permission {h:?} is <all_urls> — docs/extension-distribution.md §3.1"
+            );
+        }
+    }
+
+    #[test]
+    fn tripwire_endpoints_are_loopback_only() {
+        // Both endpoint constants stay on 127.0.0.1; there is no configurable host
+        // (docs/extension-distribution.md §3.3).
+        let bg = std::fs::read_to_string(extension_dir().join("background.js")).unwrap();
+        let endpoints: Vec<&str> = bg.lines().filter(|l| l.contains("_ENDPOINT = ")).collect();
+        assert_eq!(
+            endpoints.len(),
+            2,
+            "expected exactly the two endpoint constants in background.js — \
+             docs/extension-distribution.md §3.3"
+        );
+        for line in endpoints {
+            assert!(
+                line.contains("\"http://127.0.0.1:"),
+                "endpoint is not loopback: {line:?} — docs/extension-distribution.md §3.3"
+            );
+        }
+    }
+
+    #[test]
+    fn tripwire_match_patterns_stay_port_free() {
+        // Chrome match patterns cannot express a port — a "narrowed" `:18452` entry
+        // gets the manifest rejected (docs/extension-distribution.md §3.5).
+        let m = manifest();
+        for h in host_permissions(&m) {
+            let has_port = h
+                .as_bytes()
+                .windows(2)
+                .any(|w| w[0] == b':' && w[1].is_ascii_digit());
+            assert!(
+                !has_port,
+                "host permission {h:?} carries a port — docs/extension-distribution.md §3.5"
+            );
+        }
+    }
+
+    #[test]
+    fn tripwire_description_within_store_limit() {
+        // CWS caps the manifest description at 132 characters; over it the upload
+        // fails (docs/extension-distribution.md §4.1).
+        let m = manifest();
+        let desc = m["description"].as_str().expect("manifest has a description");
+        assert!(
+            desc.chars().count() <= 132,
+            "description is {} chars, CWS caps at 132 — docs/extension-distribution.md §4.1",
+            desc.chars().count()
+        );
+    }
+
+    #[test]
+    fn tripwire_version_and_protocol_parse() {
+        // CWS requires 1–4 dot-separated integers; the protocol constant must exist
+        // alongside it (the §4.4 version/protocol coupling).
+        let m = manifest();
+        let version = m["version"].as_str().expect("manifest has a version");
+        let parts: Vec<&str> = version.split('.').collect();
+        assert!(
+            (1..=4).contains(&parts.len()) && parts.iter().all(|p| p.parse::<u32>().is_ok()),
+            "manifest version {version:?} is not 1–4 dot-separated integers — \
+             docs/extension-distribution.md §4.4"
+        );
+        assert!(PROTOCOL >= 1, "protocol constant must exist and be ≥1 — \
+             docs/extension-distribution.md §4.4");
+
+        // The in-repo pair must agree: a runtime mismatch between *shipped*
+        // versions is the §6 diagnostic's job, but inside one commit it's a bug.
+        let bg = std::fs::read_to_string(extension_dir().join("background.js")).unwrap();
+        let ext_protocol: u32 = bg
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("const WHENCE_PROTOCOL = "))
+            .and_then(|v| v.trim_end_matches(';').parse().ok())
+            .expect("background.js declares const WHENCE_PROTOCOL = <int>; — \
+                     docs/extension-distribution.md §6");
+        assert_eq!(
+            ext_protocol, PROTOCOL,
+            "extension WHENCE_PROTOCOL and daemon PROTOCOL disagree — \
+             docs/extension-distribution.md §4.4/§6"
+        );
     }
 
     #[test]

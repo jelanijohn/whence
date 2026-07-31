@@ -129,6 +129,15 @@ export interface ReceiverAuth {
   warning?: string | null;
 }
 
+// Last-seen browser-extension handshake — mirrors `BrowserExtensionStatus` in
+// src-tauri/src/commands.rs (docs/extension-distribution.md §6). Diagnostic only:
+// a mismatch is a Settings line, never a dropped event or altered attribution.
+export interface BrowserExtensionStatus {
+  version: string | null;
+  protocol: number;
+  status: 'current' | 'outdated' | 'newer';
+}
+
 export interface Settings {
   autostart: boolean; // opt-in, default false (never silently)
   neuroskillEnabled: boolean; // write attribution labels into NeuroSkill

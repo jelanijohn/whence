@@ -2,9 +2,10 @@
 
 A first-party Whence browser extension that makes browser-hosted AI chat
 (claude.ai, chatgpt.com) visible to the Whence widget, the same way the Claude Code
-transcript watcher and hooks make CLI sessions visible. See
-`../docs/browser-llm-adapter.md` for the full design and `../whence-spec.md` §§1–2 for
-why this stays on the **producer** side of the surveillance ban.
+transcript watcher and hooks make CLI sessions visible. The daemon half lives in
+`../src-tauri/src/adapters/browser.rs`; see `../docs/extension-distribution.md` for
+how this package ships and `../whence-spec.md` §§1–2 for why it stays on the
+**producer** side of the surveillance ban.
 
 ## What it reads (and doesn't)
 
@@ -55,18 +56,37 @@ content-script keepalive port keeps the worker alive (and the poll running) only
 a provider tab is open. No extra permissions: `host_permissions` already covers both
 the loopback poll and activating the provider tabs.
 
-## Install (load unpacked)
+## Install
 
-1. In the Whence widget settings, enable **Browser → Browser AI sessions** and save
-   (the daemon then listens on `127.0.0.1:18452`).
+Either channel — first, in the Whence widget settings, enable **Browser →
+Browser AI sessions** and save (the daemon then listens on `127.0.0.1:18452`).
+
+### Chrome Web Store (preferred — auto-updates)
+
+The extension is published **unlisted** (it's inert without the widget, so it has
+no storefront presence; see `../docs/extension-distribution.md` §2).
+
+1. Install from the store link in the Whence release notes. *(Link lands with the
+   first approved submission — until then use load-unpacked below.)*
+2. Open the extension's **options** page and paste the receiver token from the
+   widget's Settings → **Receiver auth** (one time; re-paste after a rotation).
+3. Visit claude.ai or chatgpt.com. A chat filed under a project shows up as a
+   session row in the widget, attributed to that project's slug.
+
+Auto-update matters more than convenience here: the extension and the daemon share
+a wire format, and a stale extension is a silent-misattribution risk. The daemon
+surfaces a version/protocol diagnostic in Settings → Browser when the pair drift.
+
+### Load unpacked (fallback, or from a release zip)
+
+1. Grab `whence-extension-v<version>.zip` from a GitHub release and unzip it, or
+   use this `extension/` folder straight from a checkout.
 2. Open your browser's extensions page:
    - Chrome/Edge/Brave: `chrome://extensions`
-   - enable **Developer mode**, click **Load unpacked**, and select this `extension/`
-     folder.
-3. Open the extension's **options** page and paste the receiver token from the
-   widget's Settings → **Receiver auth** (one time; re-paste after a rotation).
-4. Visit claude.ai or chatgpt.com. A chat filed under a project shows up as a session
-   row in the widget, attributed to that project's slug.
+   - enable **Developer mode**, click **Load unpacked**, and select the folder.
+3. Paste the receiver token into the options page and visit a provider, exactly as
+   above. Note Chrome treats dev-mode extensions as a testing affordance — expect
+   the on-restart nag, and no auto-update.
 
 The receiver is loopback-only and **bearer-gated**: every request carries the
 token as an `Authorization` header, so other local processes (or a drive-by web
@@ -97,6 +117,8 @@ working:
   asked to raise.
 - `options.html` / `options.js` — the one-field options page holding the receiver
   token (`chrome.storage.local`).
+- `icons/` — the widget's app mark at the four manifest sizes (16/32/48/128), so
+  Whence keeps one visual identity across surfaces.
 
 To add a provider, add an entry in `providers.js` **and** extend `provider_for_host`
 in `src-tauri/src/adapters/browser.rs` (the daemon re-derives the provider from the

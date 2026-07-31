@@ -94,6 +94,11 @@ pub fn run() {
             let auth_denials: auth::Denials =
                 Arc::new(std::sync::atomic::AtomicU64::new(0));
 
+            // Last-seen extension handshake (docs/extension-distribution.md §6):
+            // the browser receiver writes, the Settings diagnostic reads.
+            let browser_extension: adapters::browser::SharedExtensionInfo =
+                Arc::new(Mutex::new(None));
+
             app.manage(AppState {
                 snapshot: shared.clone(),
                 data_dir: data_dir.clone(),
@@ -104,6 +109,7 @@ pub fn run() {
                 receiver_token: receiver_token.clone(),
                 auth_denials: auth_denials.clone(),
                 moments: moments.clone(),
+                browser_extension: browser_extension.clone(),
             });
 
             // The core task and the hooks receiver read settings through the
@@ -198,6 +204,7 @@ pub fn run() {
                                 auth_denials.clone(),
                                 settings_for_browser,
                                 moments.clone(),
+                                browser_extension,
                             ) {
                                 eprintln!("whence: browser receiver not started: {e}");
                             }
@@ -237,6 +244,7 @@ pub fn run() {
             commands::get_focus_intensity,
             commands::get_neuroskill_status,
             commands::get_browser_mapping_path,
+            commands::get_browser_extension_status,
             commands::get_settings,
             commands::set_settings,
             commands::open_settings,
