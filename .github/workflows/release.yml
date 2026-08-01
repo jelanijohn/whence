@@ -11,6 +11,9 @@ on:
 
 permissions:
   contents: write
+  # Lets the job request a GitHub OIDC token; azure/login exchanges it for the
+  # Windows-signing session, so no Azure client secret lives in the repo.
+  id-token: write
 
 jobs:
   build:
@@ -28,6 +31,12 @@ jobs:
             args: ''
 
     runs-on: ${{ matrix.platform }}
+    # The Entra federated credential is bound to this environment name: the
+    # OIDC subject claim becomes repo:<owner>/<repo>:environment:release, which
+    # sidesteps Entra's no-wildcards rule on tag-ref subjects (a plain tag
+    # trigger would need one credential per tag). Rename the environment and
+    # the federated credential together, or signing breaks.
+    environment: release
     # Job-level so step `if:` guards can test it — secrets aren't readable in
     # `if:` directly. Empty on forks, which cleanly skips the signing steps.
     env:
@@ -77,28 +86,59 @@ jobs:
           jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tauri.conf.tmp
           mv tauri.conf.tmp src-tauri/tauri.conf.json
 
-      # Windows code signing via Azure Trusted Signing. Tauri's bundler invokes
-      # trusted-signing-cli on every produced binary/installer through the
-      # signCommand hook patched in below (kept out of the committed config so
-      # local Windows builds stay unsigned). Skipped entirely when the Azure
-      # secrets are absent. Required secrets:
-      #   AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET
-      #     Entra app registration holding the "Trusted Signing Certificate
-      #     Profile Signer" role on the signing account
+      # Windows code signing via Azure Artifact Signing (né Trusted Signing),
+      # authenticated with GitHub's OIDC token — no client secret to store or
+      # rotate. azure/login exchanges the token for an Azure CLI session; the
+      # Trusted Signing signtool dlib then authenticates through that session
+      # (DefaultAzureCredential falling through to AzureCliCredential — the
+      # metadata.json excludes every other credential source so nothing hangs
+      # probing IMDS). Tauri invokes the patched-in signCommand once per
+      # artifact (exe, then each installer), so everything ships signed and
+      # timestamped; the hook stays out of the committed config so local
+      # Windows builds remain unsigned. Skipped entirely when the Azure
+      # secrets are absent (forks build unsigned). Required secrets:
+      #   AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_SUBSCRIPTION_ID
+      #     Entra app registration with a federated credential for this repo's
+      #     "release" environment and the "Artifact Signing Certificate Profile
+      #     Signer" role on the signing account
       #   AZURE_SIGNING_ENDPOINT   region URI, e.g. https://eus.codesigning.azure.net
-      #   AZURE_SIGNING_ACCOUNT    Trusted Signing account name
+      #   AZURE_SIGNING_ACCOUNT    signing account name
       #   AZURE_SIGNING_PROFILE    certificate profile name
-      - name: Install trusted-signing-cli
+      - name: Azure login (OIDC)
         if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
-        run: cargo install trusted-signing-cli --locked
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Enable Windows signing
         if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
-        shell: bash
+        shell: pwsh
         run: |
-          jq --arg cmd "trusted-signing-cli -e ${{ secrets.AZURE_SIGNING_ENDPOINT }} -a ${{ secrets.AZURE_SIGNING_ACCOUNT }} -c ${{ secrets.AZURE_SIGNING_PROFILE }} %1" \
-            '.bundle.windows.signCommand = $cmd' src-tauri/tauri.conf.json > tauri.conf.tmp
-          mv tauri.conf.tmp src-tauri/tauri.conf.json
+          nuget install Microsoft.Trusted.Signing.Client -x -OutputDirectory "$env:RUNNER_TEMP\tsc"
+          $dlib = "$env:RUNNER_TEMP\tsc\Microsoft.Trusted.Signing.Client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          if (!(Test-Path $dlib)) { throw "Trusted Signing dlib not found at $dlib" }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          $metadata = "$env:RUNNER_TEMP\tsc\metadata.json"
+          @{
+            Endpoint               = '${{ secrets.AZURE_SIGNING_ENDPOINT }}'
+            CodeSigningAccountName = '${{ secrets.AZURE_SIGNING_ACCOUNT }}'
+            CertificateProfileName = '${{ secrets.AZURE_SIGNING_PROFILE }}'
+            ExcludeCredentials     = @(
+              'EnvironmentCredential', 'WorkloadIdentityCredential',
+              'ManagedIdentityCredential', 'SharedTokenCacheCredential',
+              'VisualStudioCredential', 'VisualStudioCodeCredential',
+              'AzurePowerShellCredential', 'AzureDeveloperCliCredential',
+              'InteractiveBrowserCredential'
+            )
+          } | ConvertTo-Json | Set-Content $metadata
+          # Object form, not a plain string: Tauri splits a string signCommand
+          # on whitespace, which would mangle the spaced Windows Kits path.
+          $filter = '.bundle.windows.signCommand = {cmd: $st, args: ["sign", "/v", "/fd", "SHA256", "/tr", "http://timestamp.acs.microsoft.com", "/td", "SHA256", "/dlib", $dlib, "/dmdf", $md, "%1"]}'
+          jq --arg st "$signtool" --arg dlib "$dlib" --arg md "$metadata" $filter src-tauri/tauri.conf.json | Set-Content tauri.conf.tmp
+          Move-Item -Force tauri.conf.tmp src-tauri/tauri.conf.json
 
       # macOS code signing + notarization. tauri-action picks these up on the
       # macOS runners and skips signing when APPLE_CERTIFICATE is unset, so the
@@ -118,10 +158,6 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # trusted-signing-cli authenticates with these (EnvironmentCredential).
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Whence v__VERSION__'
