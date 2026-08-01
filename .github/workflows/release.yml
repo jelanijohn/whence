@@ -116,8 +116,10 @@ jobs:
         if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
         shell: pwsh
         run: |
-          nuget install Microsoft.Trusted.Signing.Client -x -OutputDirectory "$env:RUNNER_TEMP\tsc"
-          $dlib = "$env:RUNNER_TEMP\tsc\Microsoft.Trusted.Signing.Client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          # Microsoft.Trusted.Signing.Client was delisted in the Artifact
+          # Signing rebrand; the successor package keeps the same bin layout.
+          nuget install Microsoft.ArtifactSigning.Client -x -OutputDirectory "$env:RUNNER_TEMP\tsc"
+          $dlib = "$env:RUNNER_TEMP\tsc\Microsoft.ArtifactSigning.Client\bin\x64\Azure.CodeSigning.Dlib.dll"
           if (!(Test-Path $dlib)) { throw "Trusted Signing dlib not found at $dlib" }
           $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
             Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
