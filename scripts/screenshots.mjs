@@ -19,7 +19,7 @@ const OUT_DIR = fileURLToPath(new URL("../docs/screenshots/", import.meta.url));
 
 // Widget geometry — mirrors the height math in src/routes/+page.svelte
 // (TITLE_H + rows*ROW_H + expandedSources*SOURCE_ROW_H + context*CONTEXT_ROW_H
-// + LIST_PAD) for the mock scenario: 3 rows, 1 context line, 2 whence sources.
+// + LIST_PAD) for the mock scenario: 3 rows, 1 context line, 2 whoami sources.
 const WIDTH = 300;
 const ROSTER_H = 44 + 3 * 30 + 1 * 16 + 12; // 162
 const EXPANDED_H = ROSTER_H + 2 * 24; // 210
@@ -93,7 +93,7 @@ async function widgetPage(browser, height) {
   await page.addStyleTag({
     content: `body { padding: ${PAD}px; } .panel { height: calc(100vh - ${2 * PAD}px); }`,
   });
-  await page.locator('[title="whence"]').waitFor();
+  await page.locator('[title="whoami"]').waitFor();
   await settleFonts(page);
   return page;
 }
@@ -113,7 +113,7 @@ async function main() {
 
     // Roster with the focused project's sources expanded.
     page = await widgetPage(browser, EXPANDED_H);
-    await page.locator('[title="whence"]').getByTitle("Show sources").click();
+    await page.locator('[title="whoami"]').getByTitle("Show sources").click();
     await page.waitForTimeout(100);
     await captureBothThemes(page, "roster-expanded");
     await page.close();

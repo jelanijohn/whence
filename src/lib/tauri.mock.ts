@@ -18,7 +18,7 @@ export const WHENCE_MOCK_MARKER = "whence-mock-data";
 
 // All row timers count up from `statusSince`, so offsets are taken from module
 // load — the capture happens seconds later and the timers read as intended
-// (whence ≈ 18:32 deep, glue-mac ≈ 6:12 waiting, neuroskill ≈ 45:05 idle).
+// (whoami ≈ 18:32 deep, waid ≈ 6:12 waiting, flow ≈ 45:05 idle).
 const NOW = Math.floor(Date.now() / 1000);
 
 /** Today at a fixed local wall-clock time — timeline blocks print a believable workday. */
@@ -28,10 +28,13 @@ function todayAt(hours: number, minutes: number): number {
   return Math.floor(d.getTime() / 1000);
 }
 
+// Sample projects are deliberately *not* named "whence" — a row sharing the
+// app's name reads as the widget watching itself. The browser source sits on
+// the focused project so the expanded shot shows a live browser conversation.
 const focusSnapshot: FocusSnapshot = {
   projects: [
     {
-      project: "whence",
+      project: "whoami",
       status: "active",
       statusSince: NOW - 1112,
       active: true,
@@ -45,16 +48,16 @@ const focusSnapshot: FocusSnapshot = {
           statusSince: NOW - 1112,
         },
         {
-          surface: "terminal",
-          source: null,
-          label: "terminal",
+          surface: "browser",
+          source: "https://claude.ai/chat/abc123",
+          label: "claude web",
           status: "active",
           statusSince: NOW - 754,
         },
       ],
     },
     {
-      project: "glue-mac",
+      project: "waid",
       status: "awaiting_input",
       statusSince: NOW - 372,
       active: false,
@@ -70,70 +73,79 @@ const focusSnapshot: FocusSnapshot = {
       ],
     },
     {
-      project: "neuroskill",
+      project: "flow",
       status: "idle",
       statusSince: NOW - 2705,
       active: false,
       presence: null,
       sources: [
         {
-          surface: "browser",
-          source: "https://claude.ai/chat/abc123",
-          label: "claude web",
+          surface: "terminal",
+          source: null,
+          label: "terminal",
           status: "idle",
           statusSince: NOW - 2705,
         },
       ],
     },
   ],
-  context: { text: "main · fix HEAD parser", source: "git", observedAt: NOW - 40 },
+  // A hook-prompt context line (your last prompt, snippeted) rather than a git
+  // branch · commit — friendlier in marketing shots than tag-like git strings.
+  context: {
+    text: "add passkey support to the sign-in flow",
+    source: "hook_prompt",
+    observedAt: NOW - 40,
+  },
 };
 
+// Blocks carry git stamps only — content-derived sources are display-only and
+// never persisted (A2 posture), so posed history must not show prompt text.
 const todayBlocks: FocusBlock[] = [
   {
-    project: "whence",
+    project: "whoami",
     start: todayAt(9, 4),
     end: todayAt(10, 26),
     eventCount: 148,
     meanConfidence: 0.92,
-    context: { text: "main · scaffold settings window", source: "git" },
+    context: { text: "main · scaffold passkey enrollment", source: "git" },
   },
   {
-    project: "glue-mac",
+    project: "waid",
     start: todayAt(10, 26),
     end: todayAt(11, 12),
     eventCount: 61,
     meanConfidence: 0.88,
-    context: { text: "main · retry temporal activity", source: "git" },
+    context: { text: "main · brief editor autosave", source: "git" },
   },
   {
-    project: "whence",
+    project: "whoami",
     start: todayAt(11, 12),
     end: todayAt(11, 31),
     eventCount: 23,
     meanConfidence: 0.9,
   },
   {
-    project: "neuroskill",
+    project: "flow",
     start: todayAt(12, 58),
     end: todayAt(14, 3),
     eventCount: 87,
     meanConfidence: 0.84,
-    context: { text: "docs · auth flow notes", source: "git" },
+    context: { text: "docs · session timer notes", source: "git" },
   },
   {
-    project: "whence",
+    project: "whoami",
     start: todayAt(14, 20),
     end: todayAt(15, 47),
     eventCount: 132,
     meanConfidence: 0.95,
-    context: { text: "main · fix HEAD parser", source: "git" },
+    context: { text: "main · polish sign-in flow", source: "git" },
   },
 ];
 
 // Mirrors `impl Default for Settings` in src-tauri/src/settings.rs, camelCase
 // per the serde rename — so the settings window screenshots show real defaults.
-// One deliberate divergence: `eegReadbackEnabled` (noted inline).
+// Two deliberate divergences: `eegReadbackEnabled` and `contextHookPrompts`
+// (noted inline).
 const settings: Settings = {
   autostart: false,
   neuroskillEnabled: true,
@@ -154,7 +166,9 @@ const settings: Settings = {
   browserListenAddrOverride: null,
   contextStrings: true,
   contextTtlSeconds: 60,
-  contextHookPrompts: false,
+  // Rust defaults this off; on here so the settings shot matches the roster's
+  // hook-prompt context line (the posed scenario's second deliberate divergence).
+  contextHookPrompts: true,
   contextBrowserTitles: false,
   switchMinSeconds: 90,
   idleTimeoutSeconds: 360,
