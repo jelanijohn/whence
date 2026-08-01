@@ -28,6 +28,10 @@ jobs:
             args: ''
 
     runs-on: ${{ matrix.platform }}
+    # Job-level so step `if:` guards can test it — secrets aren't readable in
+    # `if:` directly. Empty on forks, which cleanly skips the signing steps.
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v7
 
@@ -73,9 +77,51 @@ jobs:
           jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tauri.conf.tmp
           mv tauri.conf.tmp src-tauri/tauri.conf.json
 
+      # Windows code signing via Azure Trusted Signing. Tauri's bundler invokes
+      # trusted-signing-cli on every produced binary/installer through the
+      # signCommand hook patched in below (kept out of the committed config so
+      # local Windows builds stay unsigned). Skipped entirely when the Azure
+      # secrets are absent. Required secrets:
+      #   AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET
+      #     Entra app registration holding the "Trusted Signing Certificate
+      #     Profile Signer" role on the signing account
+      #   AZURE_SIGNING_ENDPOINT   region URI, e.g. https://eus.codesigning.azure.net
+      #   AZURE_SIGNING_ACCOUNT    Trusted Signing account name
+      #   AZURE_SIGNING_PROFILE    certificate profile name
+      - name: Install trusted-signing-cli
+        if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
+        run: cargo install trusted-signing-cli --locked
+
+      - name: Enable Windows signing
+        if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
+        shell: bash
+        run: |
+          jq --arg cmd "trusted-signing-cli -e ${{ secrets.AZURE_SIGNING_ENDPOINT }} -a ${{ secrets.AZURE_SIGNING_ACCOUNT }} -c ${{ secrets.AZURE_SIGNING_PROFILE }} %1" \
+            '.bundle.windows.signCommand = $cmd' src-tauri/tauri.conf.json > tauri.conf.tmp
+          mv tauri.conf.tmp src-tauri/tauri.conf.json
+
+      # macOS code signing + notarization. tauri-action picks these up on the
+      # macOS runners and skips signing when APPLE_CERTIFICATE is unset, so the
+      # workflow still works on forks without the secrets. Required secrets:
+      #   APPLE_CERTIFICATE          base64 of the Developer ID Application .p12
+      #   APPLE_CERTIFICATE_PASSWORD password set when exporting the .p12
+      #   APPLE_SIGNING_IDENTITY     "Developer ID Application: <Name> (<TEAMID>)"
+      #   APPLE_ID                   Apple ID email for notarization
+      #   APPLE_PASSWORD             app-specific password (appleid.apple.com)
+      #   APPLE_TEAM_ID              10-char team ID
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # trusted-signing-cli authenticates with these (EnvironmentCredential).
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Whence v__VERSION__'
