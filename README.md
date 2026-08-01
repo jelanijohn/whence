@@ -11,12 +11,12 @@ Multiple projects? Multiple prompts? Status at a glance and a timeline of where 
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/roster-expanded-dark.png">
-    <img src="docs/screenshots/roster-expanded-light.png" alt="The roster widget — live projects with per-source rows, status, and the focused project's context string" width="48%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/roster-expanded-dark.png">
+    <img src="docs/media/roster-expanded-light.png" alt="The roster widget — live projects with per-source rows, status, and the focused project's context string" width="48%">
   </picture>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/timeline-dark.png">
-    <img src="docs/screenshots/timeline-light.png" alt="The timeline view — attributed focus blocks per project" width="48%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/timeline-dark.png">
+    <img src="docs/media/timeline-light.png" alt="The timeline view — attributed focus blocks per project" width="48%">
   </picture>
 </p>
 

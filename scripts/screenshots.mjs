@@ -1,7 +1,8 @@
 // Marketing screenshots, headlessly. Boots the frontend in mock mode
 // (VITE_WHENCE_MOCK=1 — see src/lib/tauri.mock.ts for the posed scenario) and
 // captures the widget states with Playwright: transparent PNGs at 2x, panel
-// shadow included, into docs/screenshots/.
+// shadow included, into docs/screenshots/ (gitignored). The curated copies the
+// README embeds live in docs/media/ — copy over after a capture worth keeping.
 //
 // One-time setup:  pnpm exec playwright install chromium
 //                  (WSL2, if launch fails: sudo pnpm exec playwright install-deps chromium)
