@@ -1,2 +1,7 @@
 allowBuilds:
   esbuild: true
+
+# cookie <0.7 has CVE-2024-47764; SvelteKit still declares ^0.6.0, so force
+# the patched line until kit bumps its own range.
+overrides:
+  cookie: ^0.7.2
