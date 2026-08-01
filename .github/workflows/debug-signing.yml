@@ -1,0 +1,50 @@
+# TEMPORARY — debug the Windows Artifact Signing failure without a 12-minute
+# tag build. Mirrors release.yml's signing setup, then smoke-signs a small
+# real PE so signtool's actual stderr lands in the log. Delete once release
+# signing is green.
+name: Debug signing
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  smoke-sign:
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Smoke-test signing
+        shell: pwsh
+        run: |
+          nuget install Microsoft.ArtifactSigning.Client -x -OutputDirectory "$env:RUNNER_TEMP\tsc"
+          $dlib = "$env:RUNNER_TEMP\tsc\Microsoft.ArtifactSigning.Client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          if (!(Test-Path $dlib)) { throw "dlib not found at $dlib" }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          $metadata = "$env:RUNNER_TEMP\tsc\metadata.json"
+          @{
+            Endpoint               = '${{ secrets.AZURE_SIGNING_ENDPOINT }}'
+            CodeSigningAccountName = '${{ secrets.AZURE_SIGNING_ACCOUNT }}'
+            CertificateProfileName = '${{ secrets.AZURE_SIGNING_PROFILE }}'
+            ExcludeCredentials     = @(
+              'EnvironmentCredential', 'WorkloadIdentityCredential',
+              'ManagedIdentityCredential', 'SharedTokenCacheCredential',
+              'VisualStudioCredential', 'VisualStudioCodeCredential',
+              'AzurePowerShellCredential', 'AzureDeveloperCliCredential',
+              'InteractiveBrowserCredential'
+            )
+          } | ConvertTo-Json | Set-Content $metadata
+          Copy-Item C:\Windows\System32\where.exe "$env:RUNNER_TEMP\smoke.exe"
+          & $signtool sign /v /debug /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $dlib /dmdf $metadata "$env:RUNNER_TEMP\smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "signtool exited $LASTEXITCODE" }
+          & $signtool verify /pa "$env:RUNNER_TEMP\smoke.exe"
