@@ -44,7 +44,20 @@ jobs:
               'InteractiveBrowserCredential'
             )
           } | ConvertTo-Json | Set-Content $metadata
+          # Wrapper mirrors the release signCommand, but tees signtool's output
+          # to a log so it survives Tauri's piped/discarded stdio.
+          $log = "$env:RUNNER_TEMP\signtool.log"
+          $wrapper = "$env:RUNNER_TEMP\tsc\sign.ps1"
+          @"
+          & '$signtool' sign /v /debug /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib '$dlib' /dmdf '$metadata' `$args[0] *>&1 | Tee-Object -FilePath '$log' -Append
+          exit `$LASTEXITCODE
+          "@ | Set-Content $wrapper
           Copy-Item C:\Windows\System32\where.exe "$env:RUNNER_TEMP\smoke.exe"
-          & $signtool sign /v /debug /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $dlib /dmdf $metadata "$env:RUNNER_TEMP\smoke.exe"
-          if ($LASTEXITCODE -ne 0) { throw "signtool exited $LASTEXITCODE" }
+          # Invoke through node with piped stdio to mimic how tauri-bundler
+          # spawns the sign command (Stdio::piped, no console passthrough).
+          $env:WRAPPER = $wrapper
+          $env:TARGET = "$env:RUNNER_TEMP\smoke.exe"
+          node -e "const r = require('child_process').spawnSync('pwsh', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', process.env.WRAPPER, process.env.TARGET], {stdio: 'pipe'}); console.log('exit:', r.status); console.log(r.stdout.toString()); console.error(r.stderr.toString()); process.exit(r.status)"
+          Write-Host '--- signtool.log ---'
+          if (Test-Path $log) { Get-Content $log }
           & $signtool verify /pa "$env:RUNNER_TEMP\smoke.exe"
