@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Package the browser extension for distribution (docs/extension-distribution.md §7):
-# zip extension/ into whence-extension-v<version>.zip, the artifact for both the
+# zip extension/ into whence-browser-extension-v<version>.zip, the artifact for both the
 # Chrome Web Store upload and the load-unpacked fallback attached to GitHub
 # releases. The version is read from manifest.json so the two cannot drift.
 set -euo pipefail
@@ -22,7 +22,7 @@ command -v zip >/dev/null || die "zip is not installed"
 VERSION=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST")
 [[ -n "$VERSION" ]] || die "could not read \"version\" from $MANIFEST"
 
-OUT="$ROOT/whence-extension-v$VERSION.zip"
+OUT="$ROOT/whence-browser-extension-v$VERSION.zip"
 rm -f "$OUT"
 
 # Package contents = exactly what the browser loads: manifest, scripts, options

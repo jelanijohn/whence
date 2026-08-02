@@ -79,7 +79,7 @@ surfaces a version/protocol diagnostic in Settings → Browser when the pair dri
 
 ### Load unpacked (fallback, or from a release zip)
 
-1. Grab `whence-extension-v<version>.zip` from a GitHub release and unzip it, or
+1. Grab `whence-browser-extension-v<version>.zip` from a GitHub release and unzip it, or
    use this `extension/` folder straight from a checkout.
 2. Open your browser's extensions page:
    - Chrome/Edge/Brave: `chrome://extensions`

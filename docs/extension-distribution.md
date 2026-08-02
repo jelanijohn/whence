@@ -124,7 +124,7 @@ The only code change outside `extension/`. Additive, backward-compatible.
 
 ## 7. Repo changes
 
-- `scripts/package-extension.sh` — zips `extension/` (excluding `README.md`, icon sources, anything dotfile) into `whence-extension-v<version>.zip`, reading the version from `manifest.json` so the two cannot drift.
+- `scripts/package-extension.sh` — zips `extension/` (excluding `README.md`, icon sources, anything dotfile) into `whence-browser-extension-v<version>.zip`, reading the version from `manifest.json` so the two cannot drift.
 - `extension/README.md` — install section rewritten: store link first, load-unpacked second, with the token-paste step in both. Also fix the dangling `../docs/browser-llm-adapter.md` reference; that doc was deleted post-implementation.
 - `whence-spec.md` §5.5 — same dangling reference, same fix. Point at `extension/` and this document.
 - `CLAUDE.md` — one line recording the durable call: *extension ships unlisted via CWS; the `key` in the manifest is the pinned public key and must not be regenerated.*
