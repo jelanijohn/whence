@@ -112,6 +112,16 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # The GitHub OIDC assertion az logged in with expires in ~5 minutes, and
+      # signing runs after the ~15-minute Rust build — by then az can no longer
+      # mint new tokens. Acquire the codesigning-scoped access token NOW (valid
+      # 60-90 min, cached by az); AzureCliCredential returns it from cache at
+      # signing time instead of re-authenticating with the dead assertion.
+      - name: Prime Artifact Signing token
+        if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
+        shell: pwsh
+        run: az account get-access-token --resource https://codesigning.azure.net --query expiresOn -o tsv
+
       - name: Enable Windows signing
         if: matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
         shell: pwsh
@@ -136,10 +146,19 @@ jobs:
               'InteractiveBrowserCredential'
             )
           } | ConvertTo-Json | Set-Content $metadata
+          # Tauri pipes the sign command's output and drops it unless the build
+          # runs at debug verbosity, so a bare signtool failure is mute. The
+          # wrapper tees everything to signtool.log, dumped by the next step on
+          # failure.
+          $wrapper = "$env:RUNNER_TEMP\tsc\sign.ps1"
+          @"
+          & '$signtool' sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib '$dlib' /dmdf '$metadata' `$args[0] *>&1 | Tee-Object -FilePath '$env:RUNNER_TEMP\signtool.log' -Append
+          exit `$LASTEXITCODE
+          "@ | Set-Content $wrapper
           # Object form, not a plain string: Tauri splits a string signCommand
-          # on whitespace, which would mangle the spaced Windows Kits path.
-          $filter = '.bundle.windows.signCommand = {cmd: $st, args: ["sign", "/v", "/fd", "SHA256", "/tr", "http://timestamp.acs.microsoft.com", "/td", "SHA256", "/dlib", $dlib, "/dmdf", $md, "%1"]}'
-          jq --arg st "$signtool" --arg dlib "$dlib" --arg md "$metadata" $filter src-tauri/tauri.conf.json | Set-Content tauri.conf.tmp
+          # on whitespace, which would mangle spaced paths.
+          $filter = '.bundle.windows.signCommand = {cmd: "pwsh", args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $w, "%1"]}'
+          jq --arg w "$wrapper" $filter src-tauri/tauri.conf.json | Set-Content tauri.conf.tmp
           Move-Item -Force tauri.conf.tmp src-tauri/tauri.conf.json
 
       # macOS code signing + notarization. tauri-action picks these up on the
@@ -167,6 +186,11 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Dump signing log on failure
+        if: failure() && matrix.platform == 'windows-latest' && env.AZURE_CLIENT_ID != ''
+        shell: pwsh
+        run: if (Test-Path "$env:RUNNER_TEMP\signtool.log") { Get-Content "$env:RUNNER_TEMP\signtool.log" } else { 'no signtool.log written' }
 
   # Attach the browser-extension zip (the load-unpacked fallback,
   # docs/extension-distribution.md §7) to the same draft release. The extension
