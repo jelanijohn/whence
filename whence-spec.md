@@ -250,7 +250,8 @@ then the provider project id (stable across renames), else a fresh mint with
 (`browser_mapping.toml`, path surfaced in Settings) written
 format-preservingly via `toml_edit`, so backfills and mints never clobber your
 hand-edits, comments, or ordering. A chat filed under no project resolves to
-`project: None` and is dropped — ambient, not an error.
+`project: None` and is dropped — ambient, not an error. Attributing these
+ambient/root chats is planned future work.
 
 Providers are selected by **host + path-prefix**, so one host can carry more
 than one surface: `claude.ai` serves both Claude chat and **Claude Design**
@@ -740,7 +741,9 @@ connection-health dot; browser LLM adapter + extension (§5.5); context strings
 (§9); settings popup window + appearance controls.
 * **v2 — payoff pipes.** WAID timeline ingestion + intention-vs-reality (§10;
 contract in [`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md));
-surface coverage expansion. Who Am I inbox candidates deferred.
+surface coverage expansion — including IDE adapters (Cursor, Codex, IntelliJ,
+VS Code), each following the §4 rule: one new file under `adapters/`, nothing
+else changes. Who Am I inbox candidates deferred.
 * **v2 (optional) — richer candidates.** Thread an aggregated semantic `detail`
 summary into `FocusBlock` so WAID's ingest can draft *what* you did, not just
 *how long*. The block carries time-attribution today (`project`, `start`/`end`,

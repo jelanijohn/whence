@@ -180,20 +180,40 @@ Plugins: `tauri-plugin-single-instance` (registered first — a sensor must not
 run twice and double-write labels), `window-state` (position memory), and
 `autostart` (opt-in, default OFF).
 
+## Known issues
+
+- **The browser extension is fragile by design.** Beyond the hostname,
+  everything it reads — project id/name, streaming, turn detection — rides
+  best-effort DOM selectors (`extension/providers.js`), so a provider UI
+  change silently degrades detection until the selectors are patched. Failure
+  is safe: a missed read yields an ambient/unlabeled session, never a wrong
+  attribution (spec §5.5).
+- **Root chats aren't attributed.** The browser adapter only attributes chats
+  filed under a provider project; a root-level chat resolves to no project and
+  is dropped as ambient. Attributing these is planned (spec §5.5).
+- **Claude Desktop isn't tracked.** The desktop app's chat tab has no clean
+  local artifact or hook to read — the available capture methods are too
+  fragile to ship right now, so the surface stays deferred (spec §5.4).
+
 ## Status & scope
 
 v0–v1.5 shipped: transcript watcher, segmentation engine (trust tiers,
 present/running, state registry), roster widget with settings window and
 appearance controls, JSONL timeline, NeuroSkill labels + health dot, hooks
 receiver, Ollama liveness, terminal corroborator, browser extension, receiver
-auth, context strings, EEG intensity meter. Planned, in order: surface
-coverage (provider-table expansion + a ChatGPT `/codex` prefix, a Jupyter
-kernel adapter, a Warp Agent adapter, a blind-spot counter); WAID timeline
-ingestion (the Whence-side contract ships in
-[`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md) — the
-intention-vs-reality view is WAID-repo work); timeline corrections (A3) and
-debounce calibration (A2) as data hygiene for the WAID view; and, deferred,
-Who Am I inbox candidates (spec §13).
+auth, context strings, EEG intensity meter.
+
+Planned, in order:
+
+- **Wider surface coverage** — provider-table expansion (a ChatGPT `/codex`
+  prefix), a Jupyter kernel adapter, a Warp Agent adapter, IDE adapters
+  (Cursor, Codex, IntelliJ, VS Code), a blind-spot counter.
+- **WAID timeline ingestion** — the Whence-side contract ships in
+  [`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md); the
+  intention-vs-reality view is WAID-repo work.
+- **Timeline corrections (A3) + debounce calibration (A2)** — data hygiene
+  for the WAID view.
+- Deferred: **Who Am I inbox candidates** (spec §13).
 
 By design Whence does **not**: scrape OS window/app focus, score or grade your
 focus, touch the phone, or auto-write to anyone's record (it proposes; humans
