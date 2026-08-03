@@ -10,7 +10,7 @@ actually sits.
 
 Multiple projects? Multiple prompts? Status at a glance and a timeline of where your actual focus lies. 
 
-[https://wollabo.com/tools/who-am-i/](https://wollabo.com/tools/who-am-i/)
+[https://wollabo.com/tools/whence](https://wollabo.com/tools/whence/)
 
 
 <p align="center">
