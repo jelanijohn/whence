@@ -2,8 +2,9 @@
 
 View your running local LLM processes, grouped by project.
 
-A small always-on-top roster of every live AI work surface — Claude Code
-sessions, browser LLM chats, Ollama models, terminals — grouped by project,
+A small always-on-top roster of every live AI work surface —
+[Claude Code](https://code.claude.com/docs) sessions, browser LLM chats,
+[Ollama](https://ollama.com) models, terminals — grouped by project,
 showing what's active, what's awaiting your input, and where your focus
 actually sits.
 
@@ -95,8 +96,9 @@ Worth knowing:
   (`auth.rs`) — minted at first launch, shown/rotatable in Settings, rejected
   requests counted visibly.
 
-**Project slug** is the join key across the ecosystem (WAID briefs, Who Am I
-naming). Resolution: `project_aliases` override → basename of the transcript's
+**Project slug** is the join key across the ecosystem
+([WAID](https://github.com/jelanijohn/waid) briefs,
+[Who Am I](https://github.com/jelanijohn/whoami) naming). Resolution: `project_aliases` override → basename of the transcript's
 first `cwd` line (lossless) → dir-name fallback. Every surface shares one
 `slugify`, so a `~/Projects/whence` checkout and a "Whence" browser project
 converge with no merge step. Claude Code managed-worktree paths collapse to
