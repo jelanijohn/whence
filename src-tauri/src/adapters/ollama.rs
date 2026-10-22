@@ -95,6 +95,8 @@ fn liveness_event(resp: &PsResponse) -> WorkEvent {
         kind: WorkKind::Active,
         confidence: LIVENESS_CONFIDENCE,
         detail: (!models.is_empty()).then(|| format!("ollama: {}", models.join(", "))),
+        work_id: None,
+        work_label: None,
     }
 }
 

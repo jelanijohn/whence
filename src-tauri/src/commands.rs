@@ -85,6 +85,8 @@ pub fn focus_source(state: State<AppState>, project: String, source: String) -> 
         kind: WorkKind::Select,
         confidence: 1.0,
         detail: Some(format!("manual select: {source}")),
+        work_id: None,
+        work_label: None,
     };
     state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
 }
@@ -286,16 +288,29 @@ pub async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// The Claude Code lifecycle events Whence registers `http` hooks for. `Stop` and
-/// the input-awaiting `Notification`s are what light the widget up as *waiting on
-/// you*; `UserPromptSubmit` clears it; the session pair bookends activity. (Tool
-/// events are deliberately omitted — transcript-watch already covers active-ness.)
-const HOOK_EVENTS: [&str; 5] = [
+/// The Claude Code lifecycle events Whence registers `http` hooks for. `Stop` /
+/// `StopFailure` and the input-awaiting `Notification`s are what light the widget
+/// up as *waiting on you*; `UserPromptSubmit` clears it; the session pair bookends
+/// activity. The tool and subagent pairs bound *open work* (segment.rs): a long
+/// tool call or an async agent writes nothing to the transcript for minutes, and
+/// without the start/done pair the session would read idle while still running.
+/// The receiver only ever answers an empty `200`, so none of these can gate a
+/// tool or a turn.
+///
+/// Adding an event here is picked up by existing installs at the next launch
+/// (`reconcile_installed_hooks`) — only for users who already opted in.
+const HOOK_EVENTS: [&str; 11] = [
     "UserPromptSubmit",
     "Stop",
+    "StopFailure",
     "Notification",
     "SessionStart",
     "SessionEnd",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 /// Per-hook dispatch timeout (seconds). Whence's receiver answers instantly with an
@@ -387,16 +402,7 @@ pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, Str
 
     // Refresh installed hooks to the new URL. Only rewrite when our hooks are
     // actually present — rotation must not install hooks the user never opted into.
-    let refresh = (|| -> Result<(), String> {
-        let base = hook_base_url(&state);
-        let path = claude_settings_path(&state)?;
-        let existing = read_json_object(&path)?;
-        if !config_has_whence_hooks(&existing, &base) {
-            return Ok(());
-        }
-        let merged = merge_hook_config(remove_hook_config(existing, &base), &hook_url(&state));
-        write_json_pretty(&path, &merged)
-    })();
+    let refresh = refresh_installed_hooks(&state).map(|_| ());
 
     let mut auth = get_receiver_auth(state);
     if let Err(e) = refresh {
@@ -408,18 +414,50 @@ pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, Str
     Ok(auth)
 }
 
+/// Rewrite an existing Whence hook install to the current URL + event set — the
+/// prune-then-merge the install path does, but **only if our hooks are already
+/// present** (never installs for a user who didn't opt in). Shared by token
+/// rotation (new URL) and the launch-time reconcile (new events). Returns whether
+/// a rewrite happened.
+fn refresh_installed_hooks(state: &AppState) -> Result<bool, String> {
+    let base = hook_base_url(state);
+    let path = claude_settings_path(state)?;
+    let existing = read_json_object(&path)?;
+    if !config_has_whence_hooks(&existing, &base) {
+        return Ok(false);
+    }
+    let merged = merge_hook_config(remove_hook_config(existing, &base), &hook_url(state));
+    write_json_pretty(&path, &merged)?;
+    Ok(true)
+}
+
+/// Launch-time reconcile: when an *older* install is present (our hooks exist but
+/// some event in [`HOOK_EVENTS`] lacks one — the set grew in a newer Whence),
+/// bring it up to date. A complete install, or no install, is left untouched, so
+/// this writes `settings.json` at most once per upgrade and never for a user who
+/// hasn't opted in. Returns whether a rewrite happened.
+pub fn reconcile_installed_hooks(state: &AppState) -> Result<bool, String> {
+    let base = hook_base_url(state);
+    let path = claude_settings_path(state)?;
+    let existing = read_json_object(&path)?;
+    if !config_has_whence_hooks(&existing, &base) || config_hooks_complete(&existing, &base) {
+        return Ok(false);
+    }
+    refresh_installed_hooks(state)
+}
+
 /// The receiver URL written into the hook config — `http://<bind>/hook/<token>`,
 /// where the bind is the (possibly overridden) loopback address the listener is
 /// using and the token is the live receiver bearer token (the `http` hook's only
 /// way to carry a credential).
-fn hook_url(state: &State<AppState>) -> String {
+fn hook_url(state: &AppState) -> String {
     let token = crate::auth::read_token(&state.receiver_token);
     format!("{}/{}", hook_base_url(state), *token)
 }
 
 /// The token-less hook URL prefix — the identity by which *any* generation of
 /// Whence hook entry is recognized for pruning/uninstall.
-fn hook_base_url(state: &State<AppState>) -> String {
+fn hook_base_url(state: &AppState) -> String {
     let addr = state
         .settings
         .lock()
@@ -434,7 +472,7 @@ fn hook_base_url(state: &State<AppState>) -> String {
 /// WSL distro walk on Windows), so hooks always install into the *same* Claude
 /// Code the transcripts come from — including WSL's `~/.claude/settings.json`,
 /// written through `\\wsl$\`, when Whence runs natively on the Windows host.
-fn claude_settings_path(state: &State<AppState>) -> Result<PathBuf, String> {
+fn claude_settings_path(state: &AppState) -> Result<PathBuf, String> {
     let override_dir = state
         .settings
         .lock()
@@ -472,10 +510,11 @@ fn write_json_pretty(path: &PathBuf, value: &serde_json::Value) -> Result<(), St
     std::fs::write(path, json).map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
-/// Our single hook spec: a fire-and-forget `http` POST to `url`. `async: true`
-/// makes Claude Code dispatch the request without blocking the turn (it never waits
-/// on Whence's receiver), and the short `timeout` bounds the dispatch so a stalled
-/// or absent listener can't hang the hook.
+/// Our single hook spec: an `http` POST to `url`. Claude Code dispatches `http`
+/// hooks synchronously (`async` is honoured for command hooks only — kept here as a
+/// harmless hint should that change), so what keeps a turn — and now every tool
+/// call — unblocked is the receiver's instant empty `200`, with the short `timeout`
+/// bounding a stalled listener and an absent one failing fast (connection refused).
 fn whence_hook(url: &str) -> serde_json::Value {
     serde_json::json!({ "type": "http", "url": url, "timeout": HOOK_TIMEOUT_SECS, "async": true })
 }
@@ -578,26 +617,41 @@ fn is_whence_hook_under(h: &serde_json::Value, base: &str) -> bool {
 }
 
 /// Whether a settings object carries any Whence hook entry under `base` — the
-/// "were hooks installed?" probe the rotation refresh keys on.
+/// "were hooks installed?" probe the rotation refresh and launch reconcile key on.
 fn config_has_whence_hooks(root: &serde_json::Value, base: &str) -> bool {
     let Some(hooks_obj) = root.get("hooks").and_then(|h| h.as_object()) else {
         return false;
     };
-    HOOK_EVENTS.iter().any(|event| {
-        hooks_obj
-            .get(*event)
-            .and_then(|g| g.as_array())
-            .map(|groups| {
-                groups.iter().any(|group| {
-                    group
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .map(|list| list.iter().any(|h| is_whence_hook_under(h, base)))
-                        .unwrap_or(false)
-                })
+    HOOK_EVENTS.iter().any(|event| event_has_whence_hook(hooks_obj, event, base))
+}
+
+/// Whether *every* event in [`HOOK_EVENTS`] carries a Whence hook under `base` — an
+/// install made by a Whence whose event set was smaller is "present but incomplete".
+fn config_hooks_complete(root: &serde_json::Value, base: &str) -> bool {
+    let Some(hooks_obj) = root.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    HOOK_EVENTS.iter().all(|event| event_has_whence_hook(hooks_obj, event, base))
+}
+
+fn event_has_whence_hook(
+    hooks_obj: &serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    base: &str,
+) -> bool {
+    hooks_obj
+        .get(event)
+        .and_then(|g| g.as_array())
+        .map(|groups| {
+            groups.iter().any(|group| {
+                group
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|list| list.iter().any(|h| is_whence_hook_under(h, base)))
+                    .unwrap_or(false)
             })
-            .unwrap_or(false)
-    })
+        })
+        .unwrap_or(false)
 }
 
 /// Coerce a `Value` to an object map, replacing a non-object with an empty one.
@@ -628,7 +682,7 @@ mod tests {
         // Unrelated top-level key untouched.
         assert_eq!(merged["model"], "claude-opus-4-8");
 
-        // All five events present and carrying our hook.
+        // Every event present and carrying our hook.
         for event in HOOK_EVENTS {
             let arr = merged["hooks"][event].as_array().unwrap();
             assert!(hook_present(arr, URL), "{event} missing whence hook");
@@ -646,13 +700,40 @@ mod tests {
     }
 
     #[test]
-    fn installed_hook_is_fire_and_forget() {
+    fn installed_hook_is_http_with_a_short_timeout() {
         let merged = merge_hook_config(serde_json::json!({}), URL);
         let hook = merged["hooks"]["Stop"][0]["hooks"][0].clone();
         assert_eq!(hook["type"], "http");
         assert_eq!(hook["url"], URL);
         assert_eq!(hook["async"], true);
         assert_eq!(hook["timeout"], 5);
+    }
+
+    #[test]
+    fn merge_adds_new_events_to_an_older_install() {
+        // An install made by a Whence that only knew the original five events.
+        let mut older = serde_json::json!({});
+        for event in ["UserPromptSubmit", "Stop", "Notification", "SessionStart", "SessionEnd"] {
+            older["hooks"][event] =
+                serde_json::json!([{ "matcher": "", "hooks": [whence_hook(URL)] }]);
+        }
+        assert!(config_has_whence_hooks(&older, URL));
+        assert!(!config_hooks_complete(&older, URL), "older install must read incomplete");
+
+        let merged = merge_hook_config(older, URL);
+        assert!(config_hooks_complete(&merged, URL));
+        for event in HOOK_EVENTS {
+            let count: usize = merged["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|g| g["hooks"].as_array().cloned().unwrap_or_default())
+                .filter(|h| is_whence_hook(h, URL))
+                .count();
+            assert_eq!(count, 1, "{event} has {count} whence hooks");
+        }
+        // Nothing installed → neither present nor complete (reconcile stays hands-off).
+        assert!(!config_hooks_complete(&serde_json::json!({}), URL));
     }
 
     #[test]

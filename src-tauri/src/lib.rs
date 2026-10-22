@@ -112,6 +112,18 @@ pub fn run() {
                 browser_extension: browser_extension.clone(),
             });
 
+            // An older hook install (fewer events than this Whence registers) is
+            // brought up to date here — only when the user already opted in; a
+            // complete or absent install is left untouched. Best-effort: a failure
+            // is logged, and Settings → Install hooks still works as the manual path.
+            match commands::reconcile_installed_hooks(&app.state::<AppState>()) {
+                Ok(true) => {
+                    eprintln!("whence: installed Claude Code hooks updated to the current event set")
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("whence: could not update installed Claude Code hooks: {e}"),
+            }
+
             // The core task and the hooks receiver read settings through the
             // shared handle too, so the NeuroSkill and context-string toggles
             // apply without a restart (the segmenter's tunables are still read

@@ -139,6 +139,15 @@ pub struct Settings {
     pub switch_min_seconds: i64,
     /// Idle gap that ends a block.
     pub idle_timeout_seconds: i64,
+    /// The idle gap used instead while a Claude Code source has *open work* — a
+    /// turn in progress (`UserPromptSubmit` → `Stop`), a tool call between its
+    /// `PreToolUse` and `PostToolUse`, or a running subagent. Those stretches are
+    /// silent by nature (a 10-minute build writes nothing), so the normal timeout
+    /// would read them as idle. This one bounds a *lost* close signal instead
+    /// (an Escape interrupt fires no `Stop`): ~30 min of total silence while
+    /// "busy" is taken as dead. Settings-file-only knob — no UI.
+    #[serde(default = "default_busy_idle_timeout")]
+    pub busy_idle_timeout_seconds: i64,
     /// Confidence at/above which a signal is *primary* (can open/switch); below it
     /// it's a weak corroborator. ~0.6 (§7). Defaulted so existing settings files load.
     #[serde(default = "default_corroborator_cutoff")]
@@ -193,6 +202,10 @@ fn default_attention_recency() -> i64 {
     120
 }
 
+fn default_busy_idle_timeout() -> i64 {
+    1800
+}
+
 fn default_widget_opacity() -> f64 {
     1.0
 }
@@ -221,6 +234,7 @@ impl Default for Settings {
             context_browser_titles: false,
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
+            busy_idle_timeout_seconds: 1800,
             corroborator_confidence_cutoff: 0.6,
             attention_recency_seconds: 120,
             widget_opacity: 1.0,
@@ -252,6 +266,7 @@ impl Settings {
         crate::engine::segment::SegmentConfig {
             switch_min_seconds: self.switch_min_seconds,
             idle_timeout_seconds: self.idle_timeout_seconds,
+            busy_idle_timeout_seconds: self.busy_idle_timeout_seconds,
             corroborator_confidence_cutoff: self.corroborator_confidence_cutoff,
             attention_recency_seconds: self.attention_recency_seconds,
         }
