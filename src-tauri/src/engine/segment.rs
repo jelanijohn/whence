@@ -101,7 +101,8 @@ pub struct SegmentConfig {
     /// The silence a source with *open work* (a turn, tool call, or subagent in
     /// flight — see the module doc) is allowed before it's judged idle anyway. Much
     /// longer than `idle_timeout_seconds`: it bounds a *lost* close signal, not
-    /// normal work. ~1800s.
+    /// normal work. ~1800s. Never shorter in effect than `idle_timeout_seconds`
+    /// (open work can only lengthen a source's idle window, never cut it).
     pub busy_idle_timeout_seconds: i64,
     /// Confidence at or above this is *primary* evidence (can open a block / drive a
     /// switch); below it the event is a *weak hint* — it only corroborates the
@@ -290,10 +291,12 @@ impl SourceState {
     }
 
     /// The silence after which this source is judged idle: the long busy timeout
-    /// while work is open, the normal idle timeout otherwise.
+    /// while work is open, the normal idle timeout otherwise. Clamped so that open
+    /// work never *shortens* the window — a user who set a one-hour idle timeout and
+    /// never saw the busy knob keeps their hour.
     fn idle_after(&self, cfg: &SegmentConfig) -> i64 {
         if self.is_busy() {
-            cfg.busy_idle_timeout_seconds
+            cfg.busy_idle_timeout_seconds.max(cfg.idle_timeout_seconds)
         } else {
             cfg.idle_timeout_seconds
         }
@@ -1442,6 +1445,20 @@ mod tests {
         // Closing the latest falls back to the one still open, whatever its key.
         s.ingest(&work_ev(10, "waid", WorkKind::ToolDone, Some("a"), None));
         assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn busy_timeout_never_shortens_a_longer_idle_timeout() {
+        // An hour-long idle timeout (set in the UI) with the default, unseen 30-minute
+        // busy knob: a source with open work must still get the hour.
+        let mut s = Segmenter::new(SegmentConfig {
+            idle_timeout_seconds: 3600,
+            ..SegmentConfig::default()
+        });
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        assert!(closed(&s.tick(3599)).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+        assert_eq!(closed(&s.tick(3600)).len(), 1);
     }
 
     #[test]

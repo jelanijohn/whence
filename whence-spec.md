@@ -527,7 +527,9 @@ All five live in settings, calibrated against your actual switching rhythm:
 * `switch_min_seconds` (~60–120s) — sustained evidence before a switch confirms.
 * `idle_timeout_seconds` (~5–10 min) — the quiet gap that ends a block.
 * `busy_idle_timeout_seconds` (~30 min) — the gap used instead while open work
-is in flight; bounds a lost close signal (settings-file-only, no UI).
+is in flight; bounds a lost close signal (settings-file-only, no UI). Never
+shorter in effect than `idle_timeout_seconds`: open work only lengthens a
+source's idle window.
 * `corroborator_confidence_cutoff` (~0.6) — at/above it a signal can drive
 switches; below it only corroborates.
 * `attention_recency_seconds` (~120) — the present-vs-running boundary.
