@@ -118,6 +118,25 @@ pub struct WorkEvent {
     /// (`"Explore"`). Shown on the source row while the work is open; never persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_label: Option<String>,
+    /// For `AwaitingInput` only: *why* the source waits. Decides what open work the
+    /// wait voids (`segment.rs` "Open work"). `None` = unknown → treated as `TurnEnd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitReason>,
+}
+
+/// Why a source is `AwaitingInput`. Only the hooks adapter can tell: Claude Code
+/// waits on you both *between* turns and *mid*-turn, and open work must survive the
+/// latter — the approved tool runs on, the turn resumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitReason {
+    /// The turn is over (`Stop`, `StopFailure`) or has been over for a while
+    /// (`idle_prompt`): nothing foreground is running, so the turn and any tool
+    /// entries are void. Agents may run on.
+    TurnEnd,
+    /// The turn is paused on you (`permission_prompt`, `elicitation_dialog`) and
+    /// resumes when you answer: the turn and its tools stay open.
+    MidTurn,
 }
 
 impl WorkEvent {
@@ -316,6 +335,7 @@ mod tests {
             detail: None,
             work_id: None,
             work_label: None,
+            wait: None,
         };
         // 2026-06-24T15:00:00Z in unix seconds.
         assert_eq!(e.ts_secs(), Some(1_782_313_200));

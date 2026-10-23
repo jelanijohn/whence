@@ -240,6 +240,7 @@ fn event_for_path(
         detail: None,
         work_id: None,
         work_label: None,
+        wait: None,
     })
 }
 

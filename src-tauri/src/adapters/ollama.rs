@@ -97,6 +97,7 @@ fn liveness_event(resp: &PsResponse) -> WorkEvent {
         detail: (!models.is_empty()).then(|| format!("ollama: {}", models.join(", "))),
         work_id: None,
         work_label: None,
+        wait: None,
     }
 }
 

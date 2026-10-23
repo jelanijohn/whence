@@ -32,7 +32,14 @@ export interface WorkEvent {
   detail?: string | null;
   work_id?: string | null; // tool_use_id / agent_id — pairs a done with its start
   work_label?: string | null; // tool name / agent type — display only
+  wait?: WaitReason | null; // awaiting_input only: why it waits — decides what open work survives
 }
+
+// Why a source is awaiting_input (hooks adapter only). turn_end = Stop / StopFailure /
+// idle_prompt: the turn is over, orphaned tool entries are void. mid_turn =
+// permission_prompt / elicitation_dialog: the turn is paused on you and resumes, so the
+// turn and its pending tool stay open. Absent = treated as turn_end.
+export type WaitReason = "turn_end" | "mid_turn";
 
 export type Status = "active" | "awaiting_input" | "idle";
 

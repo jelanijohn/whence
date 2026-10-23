@@ -30,7 +30,8 @@ use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{
-    claude_code, collapse_worktree_cwd, slug_from_transcript_dir, Surface, WorkEvent, WorkKind,
+    claude_code, collapse_worktree_cwd, slug_from_transcript_dir, Surface, WaitReason, WorkEvent,
+    WorkKind,
 };
 
 /// The subset of a Claude Code hook payload we read. Claude Code adds fields over
@@ -130,6 +131,24 @@ pub fn hook_to_event(
         _ => (None, None),
     };
 
+    // Why it waits, for `AwaitingInput` only. A permission/elicitation prompt pauses
+    // the turn mid-flight (the tool whose `PreToolUse` already fired runs once you
+    // approve, and the turn then resumes), so the engine must keep that work open;
+    // `Stop`/`StopFailure`/`idle_prompt` mean the turn is over and any still-open tool
+    // entry is an orphan (an interrupted call that never got its done).
+    let wait = match (kind, p.hook_event_name.as_str()) {
+        (WorkKind::AwaitingInput, "Notification")
+            if matches!(
+                p.notification_type.as_deref(),
+                Some("permission_prompt" | "elicitation_dialog")
+            ) =>
+        {
+            Some(WaitReason::MidTurn)
+        }
+        (WorkKind::AwaitingInput, _) => Some(WaitReason::TurnEnd),
+        _ => None,
+    };
+
     // Resolve the project for *every* event, status-only ones included. The widget
     // now shows one row per project (§ multi-session), so a `Stop`/`Notification`
     // must say *which* session is awaiting you — its status lands on that project's
@@ -177,6 +196,7 @@ pub fn hook_to_event(
         detail,
         work_id,
         work_label,
+        wait,
     })
 }
 
@@ -420,6 +440,7 @@ mod tests {
     fn stop_is_awaiting_input_and_carries_its_project() {
         let ev = hook_to_event(&payload("Stop"), &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
+        assert_eq!(ev.wait, Some(WaitReason::TurnEnd));
         assert_eq!(ev.surface, Surface::ClaudeCode);
         // Status-only, but still attributed so its row knows which session is awaiting.
         assert_eq!(ev.project.as_deref(), Some("whence"));
@@ -554,19 +575,22 @@ mod tests {
 
     #[test]
     fn notification_awaiting_only_for_input_kinds() {
+        // idle_prompt: the turn has been over for a while — a turn-end wait.
         let mut idle = payload("Notification");
         idle.notification_type = Some("idle_prompt".into());
-        assert_eq!(
-            hook_to_event(&idle, &no_aliases(), None, NOW, false).unwrap().kind,
-            WorkKind::AwaitingInput
-        );
+        let ev = hook_to_event(&idle, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.kind, WorkKind::AwaitingInput);
+        assert_eq!(ev.wait, Some(WaitReason::TurnEnd));
 
-        let mut perm = payload("Notification");
-        perm.notification_type = Some("permission_prompt".into());
-        assert_eq!(
-            hook_to_event(&perm, &no_aliases(), None, NOW, false).unwrap().kind,
-            WorkKind::AwaitingInput
-        );
+        // permission_prompt / elicitation_dialog pause the turn mid-flight: the
+        // engine must keep the turn and the pending tool open through them.
+        for mid in ["permission_prompt", "elicitation_dialog"] {
+            let mut perm = payload("Notification");
+            perm.notification_type = Some(mid.into());
+            let ev = hook_to_event(&perm, &no_aliases(), None, NOW, false).unwrap();
+            assert_eq!(ev.kind, WorkKind::AwaitingInput);
+            assert_eq!(ev.wait, Some(WaitReason::MidTurn), "{mid}");
+        }
 
         // A non-input notification (e.g. auth_success) is not a status signal.
         let mut other = payload("Notification");

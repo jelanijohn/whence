@@ -87,6 +87,7 @@ pub fn focus_source(state: State<AppState>, project: String, source: String) -> 
         detail: Some(format!("manual select: {source}")),
         work_id: None,
         work_label: None,
+        wait: None,
     };
     state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
 }

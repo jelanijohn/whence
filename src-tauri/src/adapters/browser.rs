@@ -368,6 +368,7 @@ pub fn event_for(
         detail: p.url.clone().map(|u| format!("browser: {u}")),
         work_id: None,
         work_label: None,
+        wait: None,
     }
 }
 

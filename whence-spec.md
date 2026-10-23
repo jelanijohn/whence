@@ -322,6 +322,7 @@ interface WorkEvent {
   detail?: string | null;// optional semantic payload (prompt summary, etc.)
   work_id?: string | null;    // tool_use_id / agent_id — pairs a *_done with its start
   work_label?: string | null; // tool name / agent type — the busy label, display only
+  wait?: "turn_end" | "mid_turn" | null; // awaiting_input only: why it waits (§7 open work)
 }
 ```
 
@@ -454,26 +455,43 @@ and an async subagent keeps working after the parent turn has ended (`Stop`).
 Heartbeats aren't available, so Whence uses **state bounded by hook pairs**
 instead. Each source keeps a small set of open-work entries:
 
-* `turn` — `prompt` → `awaiting_input` (Claude Code only: the browser streams
-`active` while it works, so its turns are never silent, and a tab closed
-mid-stream must not pin a busy row). A new `prompt` also voids the previous
-turn's tool entries.
-* `tool:<tool_use_id>` — `tool_use` → `tool_done`. Entries survive an
-`awaiting_input`: `PreToolUse` fires *before* a permission prompt, and the
-approved tool then runs with no hook of its own — the open entry covers it.
+* `turn` — `prompt` → a *turn-end* `awaiting_input` (Claude Code only: the
+browser streams `active` while it works, so its turns are never silent, and a
+tab closed mid-stream must not pin a busy row). A tool event also (re)opens the
+turn — it proves one is in flight even when Whence never saw the prompt (hooks
+installed mid-session). A new `prompt` voids the previous turn's tool entries.
+* `tool:<tool_use_id>` — `tool_use` → `tool_done`.
 * `agent:<agent_id>` — `agent_start` → `agent_done`, on the parent session, so
 an async agent holds its parent through the parent's `Stop`.
+
+An `awaiting_input` carries *why* (`wait`), and that decides what it voids. A
+**mid-turn** wait (`permission_prompt`, `elicitation_dialog`) pauses the turn on
+you: `PreToolUse` fired *before* the prompt and the approved tool then runs with
+no hook of its own, so the turn and the pending tool stay open — they cover
+that stretch and the thinking after the result. A **turn-end** wait (`Stop`,
+`StopFailure`, `idle_prompt`, or any surface that can't say) voids the turn and
+any tool entry still open — a tool with no done by then was interrupted.
+Agents outlive turns and close only on their own `agent_done`. `session_start`
+is deliberately *not* a reset: the transcript watcher emits one when the
+session's file appears, which under a polling watcher can land after the
+hook's prompt or first tool on the same source.
 
 While the set is non-empty the source is **busy**: `tick` judges it by
 `busy_idle_timeout_seconds` (~30 min of silence) rather than
 `idle_timeout_seconds`, and the row shows the most recently opened tool/agent
 label (`· Bash`, `· Explore`). Busy and status are independent — after `Stop`
 with an agent still running the row reads *awaiting you · Explore* and stays
-off the idle path. A lost close (an Escape interrupt fires neither `Stop` nor
-`PostToolUseFailure`) is bounded by the busy timeout, and the next `prompt` or
-an `idle_prompt` notification clears it sooner. When silence does win, the open
-work is voided with the idle flip. Known gap: a *background* Bash after the
-turn ends reads `awaiting_input` until its task notification re-opens the turn.
+off the idle path; `agent_done` then reads *active*, since a finished
+background agent wakes its parent (the completion notification arrives as a
+synthetic `UserPromptSubmit`). A lost close (an Escape interrupt fires neither
+`Stop` nor `PostToolUseFailure`) is bounded by the busy timeout, and the next
+`prompt` or an `idle_prompt` notification clears it sooner. When silence does
+win, the open work is voided with the idle flip. Sources idle on their own
+clocks, so a quiet browser tab can be swept away while a busy session on the
+same project holds the block; the project keeps the evicted source's last
+activity so the block still ends at its last real evidence. Known gap: a
+*background* Bash after the turn ends reads `awaiting_input` until its task
+notification re-opens the turn.
 
 ### Present vs running (honest attribution while work runs unattended)
 
