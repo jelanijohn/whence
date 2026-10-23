@@ -30,7 +30,8 @@ use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{
-    claude_code, collapse_worktree_cwd, slug_from_transcript_dir, Surface, WorkEvent, WorkKind,
+    claude_code, collapse_worktree_cwd, slug_from_transcript_dir, Surface, WaitReason, WorkEvent,
+    WorkKind,
 };
 
 /// The subset of a Claude Code hook payload we read. Claude Code adds fields over
@@ -56,6 +57,20 @@ pub struct HookPayload {
     /// context source is on — otherwise dropped at this boundary, never carried.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// For `PreToolUse` / `PostToolUse` / `PostToolUseFailure`: the tool's name
+    /// (`"Bash"`, `"Agent"`, an MCP tool id) — a display label, never content.
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    /// Same events: the per-call id that pairs a post with its pre, so parallel tool
+    /// calls on one session are tracked individually.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+    /// For `SubagentStart` / `SubagentStop`: the agent's id (pairs stop with start)
+    /// and its type (`"Explore"`, `"general-purpose"`) — the display label.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
 }
 
 /// Map a hook payload to a `WorkEvent`, or `None` for events we don't act on.
@@ -80,7 +95,9 @@ pub fn hook_to_event(
 ) -> Option<WorkEvent> {
     let kind = match p.hook_event_name.as_str() {
         "UserPromptSubmit" => WorkKind::Prompt,
-        "Stop" => WorkKind::AwaitingInput,
+        // `StopFailure` fires *instead of* `Stop` on an API error: the turn is over
+        // either way, and either way Claude is waiting on you.
+        "Stop" | "StopFailure" => WorkKind::AwaitingInput,
         // Only the "Claude wants you" notifications count as awaiting-input. Other
         // notification types (auth_success, …) aren't a status signal.
         "Notification"
@@ -93,9 +110,43 @@ pub fn hook_to_event(
         }
         "SessionStart" => WorkKind::SessionStart,
         "SessionEnd" => WorkKind::SessionEnd,
-        // Tool events and everything else: ignored. Transcript-watch already covers
-        // active-ness; folding tool hooks in here would just add noise.
+        // Tool and subagent events bound *open work* — the engine holds the source
+        // busy between a start and its done, so a long tool call or an async agent
+        // that writes nothing for minutes never idles out (segment.rs "open work").
+        // `PostToolUse` fires only on success; `PostToolUseFailure` on error — both
+        // close the call. (A cancelled tool fires neither: the busy timeout bounds it.)
+        "PreToolUse" => WorkKind::ToolUse,
+        "PostToolUse" | "PostToolUseFailure" => WorkKind::ToolDone,
+        "SubagentStart" => WorkKind::AgentStart,
+        "SubagentStop" => WorkKind::AgentDone,
+        // Everything else (`PreCompact`, non-input notifications, …): ignored.
         _ => return None,
+    };
+
+    // The open-work pairing key + label, for the four work kinds only. Everything
+    // else leaves them `None` — the engine ignores them on other kinds anyway.
+    let (work_id, work_label) = match kind {
+        WorkKind::ToolUse | WorkKind::ToolDone => (p.tool_use_id.clone(), p.tool_name.clone()),
+        WorkKind::AgentStart | WorkKind::AgentDone => (p.agent_id.clone(), p.agent_type.clone()),
+        _ => (None, None),
+    };
+
+    // Why it waits, for `AwaitingInput` only. A permission/elicitation prompt pauses
+    // the turn mid-flight (the tool whose `PreToolUse` already fired runs once you
+    // approve, and the turn then resumes), so the engine must keep that work open;
+    // `Stop`/`StopFailure`/`idle_prompt` mean the turn is over and any still-open tool
+    // entry is an orphan (an interrupted call that never got its done).
+    let wait = match (kind, p.hook_event_name.as_str()) {
+        (WorkKind::AwaitingInput, "Notification")
+            if matches!(
+                p.notification_type.as_deref(),
+                Some("permission_prompt" | "elicitation_dialog")
+            ) =>
+        {
+            Some(WaitReason::MidTurn)
+        }
+        (WorkKind::AwaitingInput, _) => Some(WaitReason::TurnEnd),
+        _ => None,
     };
 
     // Resolve the project for *every* event, status-only ones included. The widget
@@ -143,6 +194,9 @@ pub fn hook_to_event(
         kind,
         confidence: 1.0, // cwd-derived attribution, same as the transcript adapter
         detail,
+        work_id,
+        work_label,
+        wait,
     })
 }
 
@@ -344,6 +398,10 @@ pub fn serve(
                         }
                     }
                 }
+                // Always an *empty* 200, never a JSON body. An `http` hook is
+                // synchronous (Claude Code waits for the reply — `async` only exists
+                // for command hooks), and on `PreToolUse` a body carrying a
+                // `decision` would gate the tool. Whence observes; it never gates.
                 let _ = req.respond(tiny_http::Response::empty(200));
             }
         })
@@ -367,6 +425,10 @@ mod tests {
             ),
             notification_type: None,
             prompt: None,
+            tool_name: None,
+            tool_use_id: None,
+            agent_id: None,
+            agent_type: None,
         }
     }
 
@@ -378,6 +440,7 @@ mod tests {
     fn stop_is_awaiting_input_and_carries_its_project() {
         let ev = hook_to_event(&payload("Stop"), &no_aliases(), None, NOW, false).unwrap();
         assert_eq!(ev.kind, WorkKind::AwaitingInput);
+        assert_eq!(ev.wait, Some(WaitReason::TurnEnd));
         assert_eq!(ev.surface, Surface::ClaudeCode);
         // Status-only, but still attributed so its row knows which session is awaiting.
         assert_eq!(ev.project.as_deref(), Some("whence"));
@@ -422,6 +485,7 @@ mod tests {
             transcript_path: Some(path.to_string_lossy().into_owned()),
             notification_type: None,
             prompt: None,
+            ..payload("UserPromptSubmit")
         };
         let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
         // Launch dir "blapp-web" beats the drifted cwd ("api") and lossy dir-name ("web").
@@ -452,6 +516,7 @@ mod tests {
             ),
             notification_type: None,
             prompt: None,
+            ..payload("UserPromptSubmit")
         };
         let ev = hook_to_event(&p, &no_aliases(), Some(&root), NOW, false).unwrap();
         // Rebased cwd read gives "blapp-web"; the dir-name fallback would say "web".
@@ -510,19 +575,22 @@ mod tests {
 
     #[test]
     fn notification_awaiting_only_for_input_kinds() {
+        // idle_prompt: the turn has been over for a while — a turn-end wait.
         let mut idle = payload("Notification");
         idle.notification_type = Some("idle_prompt".into());
-        assert_eq!(
-            hook_to_event(&idle, &no_aliases(), None, NOW, false).unwrap().kind,
-            WorkKind::AwaitingInput
-        );
+        let ev = hook_to_event(&idle, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.kind, WorkKind::AwaitingInput);
+        assert_eq!(ev.wait, Some(WaitReason::TurnEnd));
 
-        let mut perm = payload("Notification");
-        perm.notification_type = Some("permission_prompt".into());
-        assert_eq!(
-            hook_to_event(&perm, &no_aliases(), None, NOW, false).unwrap().kind,
-            WorkKind::AwaitingInput
-        );
+        // permission_prompt / elicitation_dialog pause the turn mid-flight: the
+        // engine must keep the turn and the pending tool open through them.
+        for mid in ["permission_prompt", "elicitation_dialog"] {
+            let mut perm = payload("Notification");
+            perm.notification_type = Some(mid.into());
+            let ev = hook_to_event(&perm, &no_aliases(), None, NOW, false).unwrap();
+            assert_eq!(ev.kind, WorkKind::AwaitingInput);
+            assert_eq!(ev.wait, Some(WaitReason::MidTurn), "{mid}");
+        }
 
         // A non-input notification (e.g. auth_success) is not a status signal.
         let mut other = payload("Notification");
@@ -543,9 +611,59 @@ mod tests {
     }
 
     #[test]
-    fn tool_and_unknown_events_are_ignored() {
-        assert!(hook_to_event(&payload("PreToolUse"), &no_aliases(), None, NOW, false).is_none());
-        assert!(hook_to_event(&payload("PostToolUse"), &no_aliases(), None, NOW, false).is_none());
+    fn tool_events_bound_open_work_with_id_and_label() {
+        let mut pre = payload("PreToolUse");
+        pre.tool_name = Some("Bash".into());
+        pre.tool_use_id = Some("toolu_1".into());
+        let ev = hook_to_event(&pre, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.kind, WorkKind::ToolUse);
+        assert!(ev.kind.is_focus_evidence());
+        assert_eq!(ev.work_id.as_deref(), Some("toolu_1"));
+        assert_eq!(ev.work_label.as_deref(), Some("Bash"));
+        assert_eq!(ev.source.as_deref(), Some("s")); // lands on the session's row
+        assert_eq!(ev.detail, None); // the tool name is a label, never a context moment
+
+        for done in ["PostToolUse", "PostToolUseFailure"] {
+            let mut post = payload(done);
+            post.tool_use_id = Some("toolu_1".into());
+            let ev = hook_to_event(&post, &no_aliases(), None, NOW, false).unwrap();
+            assert_eq!(ev.kind, WorkKind::ToolDone, "{done}");
+            assert_eq!(ev.work_id.as_deref(), Some("toolu_1"));
+        }
+    }
+
+    #[test]
+    fn subagent_events_bound_open_work_on_the_parent_session() {
+        let mut start = payload("SubagentStart");
+        start.agent_id = Some("agent_9".into());
+        start.agent_type = Some("Explore".into());
+        let ev = hook_to_event(&start, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.kind, WorkKind::AgentStart);
+        assert_eq!(ev.work_id.as_deref(), Some("agent_9"));
+        assert_eq!(ev.work_label.as_deref(), Some("Explore"));
+        assert_eq!(ev.source.as_deref(), Some("s"));
+
+        let mut stop = payload("SubagentStop");
+        stop.agent_id = Some("agent_9".into());
+        let ev = hook_to_event(&stop, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.kind, WorkKind::AgentDone);
+        assert_eq!(ev.work_id.as_deref(), Some("agent_9"));
+    }
+
+    #[test]
+    fn stop_failure_is_awaiting_input_too() {
+        let ev = hook_to_event(&payload("StopFailure"), &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.kind, WorkKind::AwaitingInput);
+    }
+
+    #[test]
+    fn non_work_events_carry_no_work_fields_and_unknown_events_are_ignored() {
+        let mut p = payload("Stop");
+        p.tool_use_id = Some("stray".into()); // a field we don't read on this event
+        let ev = hook_to_event(&p, &no_aliases(), None, NOW, false).unwrap();
+        assert_eq!(ev.work_id, None);
+        assert_eq!(ev.work_label, None);
+        assert!(hook_to_event(&payload("PreCompact"), &no_aliases(), None, NOW, false).is_none());
         assert!(hook_to_event(&payload("SomethingNew"), &no_aliases(), None, NOW, false).is_none());
     }
 

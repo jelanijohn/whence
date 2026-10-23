@@ -366,6 +366,9 @@ pub fn event_for(
         kind,
         confidence: 1.0, // self-attributed from the provider's own project identity (§2)
         detail: p.url.clone().map(|u| format!("browser: {u}")),
+        work_id: None,
+        work_label: None,
+        wait: None,
     }
 }
 

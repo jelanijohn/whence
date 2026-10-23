@@ -11,7 +11,10 @@ export type Surface =
 export type WorkKind =
   | "session_start"
   | "prompt"
-  | "tool_use"
+  | "tool_use" // a tool call started (PreToolUse) — opens a unit of work
+  | "tool_done" // …and finished (PostToolUse / PostToolUseFailure) — closes it
+  | "agent_start" // a subagent started (SubagentStart) — open work on the parent
+  | "agent_done" // …and finished (SubagentStop)
   | "awaiting_input"
   | "active"
   | "idle"
@@ -27,7 +30,16 @@ export interface WorkEvent {
   kind: WorkKind;
   confidence: number; // 0..1
   detail?: string | null;
+  work_id?: string | null; // tool_use_id / agent_id — pairs a done with its start
+  work_label?: string | null; // tool name / agent type — display only
+  wait?: WaitReason | null; // awaiting_input only: why it waits — decides what open work survives
 }
+
+// Why a source is awaiting_input (hooks adapter only). turn_end = Stop / StopFailure /
+// idle_prompt: the turn is over, orphaned tool entries are void. mid_turn =
+// permission_prompt / elicitation_dialog: the turn is paused on you and resumes, so the
+// turn and its pending tool stay open. Absent = treated as turn_end.
+export type WaitReason = "turn_end" | "mid_turn";
 
 export type Status = "active" | "awaiting_input" | "idle";
 
@@ -92,6 +104,7 @@ export interface SourceSnapshot {
   label: string; // display label; numbered ("terminal 1") when a kind repeats
   status: Status;
   statusSince: number; // unix seconds; the source's time-in-status timer base
+  busy?: string | null; // label of the tool call / subagent still in flight ("Bash", "Explore"); absent = none
 }
 
 // One project row in the roster (§9) — one per project with a live/recent source.
@@ -160,6 +173,7 @@ export interface Settings {
   contextBrowserTitles: boolean; // also show the browser conversation's title; opt-in, display-only (never persisted)
   switchMinSeconds: number; // sustained evidence to confirm a switch
   idleTimeoutSeconds: number; // gap that ends a block
+  busyIdleTimeoutSeconds: number; // the gap used instead while a turn / tool call / subagent is open; settings-file-only knob (no UI)
   corroboratorConfidenceCutoff: number; // ≥ this = primary signal; below = weak hint (§7)
   attentionRecencySeconds: number; // present-vs-running boundary: act recency window (§7)
   widgetOpacity: number; // whole-widget opacity, 0.3..1 (1 = opaque); constant, frontend-only

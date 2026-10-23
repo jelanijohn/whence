@@ -161,11 +161,21 @@ file notifications never cross the 9P bridge.
 `http` hooks give **live status** the transcript can't cleanly infer — the
 difference between Claude Code *running* and *awaiting your input*. A small
 loopback `tiny_http` listener (default `127.0.0.1:18450`, override via
-`hook_listen_addr_override`) receives fire-and-forget POSTs:
-`Stop` / `Notification` → `awaiting_input`, `UserPromptSubmit` → back to
-`active`. The listener is bearer-gated (§5.6); since `http` hooks can't set
-headers, the token rides in the installed URL (`/hook/<token>`), so the
-install/uninstall round-trip carries auth with zero extra steps.
+`hook_listen_addr_override`) receives the POSTs: `Stop` / `StopFailure` /
+input-awaiting `Notification`s → `awaiting_input`, `UserPromptSubmit` → back to
+`active`. The same hooks also **bound open work** (§7 *Open work*): a
+`UserPromptSubmit`…`Stop` pair is a turn, `PreToolUse`…`PostToolUse` /
+`PostToolUseFailure` a tool call (paired by `tool_use_id`, so parallel calls are
+independent), `SubagentStart`…`SubagentStop` a subagent on the *parent*
+session — the payload's `tool_name` / `agent_type` becomes the row's busy
+label. Claude Code dispatches `http` hooks synchronously (`async` is a
+command-hook field), so what keeps turns and tool calls unblocked is the
+receiver's instant, always-empty `200` — it carries no `decision`, so Whence
+can never gate a tool. An absent Whence fails fast (connection refused); the
+5 s `timeout` bounds a stalled one. The listener is bearer-gated (§5.6); since
+`http` hooks can't set headers, the token rides in the installed URL
+(`/hook/<token>`), so the install/uninstall round-trip carries auth with zero
+extra steps.
 
 Installation is **opt-in and explicit** (principle 2): `install_claude_hooks`
 (a button in Settings) does a merge-preserving write of the hook config into
@@ -175,8 +185,11 @@ settings, where Claude Code actually reads them. `uninstall_claude_hooks`
 round-trips the config back out. Install prunes stale Whence entries under the
 same base first (an old token, or a pre-auth bare `/hook`), so upgrading or
 rotating the token is just clicking **Install hooks** again — rotation rewrites
-installed hooks automatically. The event-to-`WorkEvent` mapping is pure and
-fixture-tested; only the socket is impure.
+installed hooks automatically, and so does launch when an install from an older
+Whence lacks events the current one registers (`reconcile_installed_hooks`:
+present-but-incomplete only — never for a user who hasn't opted in). The
+event-to-`WorkEvent` mapping is pure and fixture-tested; only the socket is
+impure.
 
 ### 5.2 Ollama (liveness / status only)
 
@@ -302,12 +315,22 @@ interface WorkEvent {
   label?: string | null; // optional human label ("terminal 1", "chatgpt web") for
                          // the roster; derived from surface + index if absent
   project: string | null;// resolved project slug (null = unattributed activity)
-  kind: "session_start" | "prompt" | "tool_use" | "awaiting_input"
-      | "active" | "idle" | "session_end";
+  kind: "session_start" | "prompt" | "tool_use" | "tool_done"
+      | "agent_start" | "agent_done" | "awaiting_input"
+      | "active" | "idle" | "session_end" | "select";
   confidence: number;    // 0..1 — cwd-derived ~1.0, weak corroborator ~0.4
   detail?: string | null;// optional semantic payload (prompt summary, etc.)
+  work_id?: string | null;    // tool_use_id / agent_id — pairs a *_done with its start
+  work_label?: string | null; // tool name / agent type — the busy label, display only
+  wait?: "turn_end" | "mid_turn" | null; // awaiting_input only: why it waits (§7 open work)
 }
 ```
+
+The start/done pairs (`tool_use`/`tool_done`, `agent_start`/`agent_done`) are
+autonomous *Claude worked* evidence like `active`, and additionally bound a unit
+of **open work** on their source (§7). `work_id`/`work_label` are deliberately
+separate from `detail`: the hooks receiver records `detail` as a context
+moment, and the engine must never read `detail`.
 
 `source` is what the roster (§9) groups and counts on: `project` groups
 sources, `source` distinguishes the concurrent ones within a group. Adapters
@@ -383,10 +406,11 @@ current answer. The tier is read off `kind` + `confidence` — no model change;
 * **You acted** — `prompt`, `session_start` at full confidence. You're actually
 here. Strongest: can open a block, trigger and confirm a switch, and *protect*
 the current project from being pulled away by weaker signals.
-* **Claude worked on its own** — `tool_use` and other autonomous transcript
-growth. High confidence in *which* project the work is on, low confidence in
-whether you're watching. Keeps the current block alive (and can open one from
-idle), but is slow to trigger a switch and never protects the current project.
+* **Claude worked on its own** — `tool_use` / `tool_done`, `agent_start` /
+`agent_done`, and other autonomous transcript growth (`active`). High
+confidence in *which* project the work is on, low confidence in whether you're
+watching. Keeps the current block alive (and can open one from idle), but is
+slow to trigger a switch and never protects the current project.
 * **Weak hint** — anything below `corroborator_confidence_cutoff` (terminal
 cwd). Only nudges: reinforces whatever's already current; can't open, switch,
 or protect.
@@ -416,8 +440,58 @@ event. On confirm: close the current block (write
 new one (`Whence:project=<new>:start`).
 * **Idle**: no *you-acted* or *Claude-worked* event for `idle_timeout_seconds`
 (~5–10 min) ends the block (status → idle; no project attributed to the gap).
-Weak hints don't reset it.
+Weak hints don't reset it. A source with **open work** (below) is judged by
+`busy_idle_timeout_seconds` instead; the block closes only once every source
+of the active project is quiet past its own threshold.
 * **`session_end`** → close the current block.
+
+### Open work (busy vs quiet — long runs don't idle out)
+
+Idle is decided from silence, but a Claude Code session is silent exactly when
+its work is long: the transcript gets a line when a content block *completes*
+(the `tool_use` before a tool runs, the `tool_result` after), so a 10-minute
+build, a long thinking stretch, or a long MCP call writes nothing in between;
+and an async subagent keeps working after the parent turn has ended (`Stop`).
+Heartbeats aren't available, so Whence uses **state bounded by hook pairs**
+instead. Each source keeps a small set of open-work entries:
+
+* `turn` — `prompt` → a *turn-end* `awaiting_input` (Claude Code only: the
+browser streams `active` while it works, so its turns are never silent, and a
+tab closed mid-stream must not pin a busy row). A tool event also (re)opens the
+turn — it proves one is in flight even when Whence never saw the prompt (hooks
+installed mid-session). A new `prompt` voids the previous turn's tool entries.
+* `tool:<tool_use_id>` — `tool_use` → `tool_done`.
+* `agent:<agent_id>` — `agent_start` → `agent_done`, on the parent session, so
+an async agent holds its parent through the parent's `Stop`.
+
+An `awaiting_input` carries *why* (`wait`), and that decides what it voids. A
+**mid-turn** wait (`permission_prompt`, `elicitation_dialog`) pauses the turn on
+you: `PreToolUse` fired *before* the prompt and the approved tool then runs with
+no hook of its own, so the turn and the pending tool stay open — they cover
+that stretch and the thinking after the result. A **turn-end** wait (`Stop`,
+`StopFailure`, `idle_prompt`, or any surface that can't say) voids the turn and
+any tool entry still open — a tool with no done by then was interrupted.
+Agents outlive turns and close only on their own `agent_done`. `session_start`
+is deliberately *not* a reset: the transcript watcher emits one when the
+session's file appears, which under a polling watcher can land after the
+hook's prompt or first tool on the same source.
+
+While the set is non-empty the source is **busy**: `tick` judges it by
+`busy_idle_timeout_seconds` (~30 min of silence) rather than
+`idle_timeout_seconds`, and the row shows the most recently opened tool/agent
+label (`· Bash`, `· Explore`). Busy and status are independent — after `Stop`
+with an agent still running the row reads *awaiting you · Explore* and stays
+off the idle path; `agent_done` then reads *active*, since a finished
+background agent wakes its parent (the completion notification arrives as a
+synthetic `UserPromptSubmit`). A lost close (an Escape interrupt fires neither
+`Stop` nor `PostToolUseFailure`) is bounded by the busy timeout, and the next
+`prompt` or an `idle_prompt` notification clears it sooner. When silence does
+win, the open work is voided with the idle flip. Sources idle on their own
+clocks, so a quiet browser tab can be swept away while a busy session on the
+same project holds the block; the project keeps the evicted source's last
+activity so the block still ends at its last real evidence. Known gap: a
+*background* Bash after the turn ends reads `awaiting_input` until its task
+notification re-opens the turn.
 
 ### Present vs running (honest attribution while work runs unattended)
 
@@ -448,10 +522,14 @@ any real signal points elsewhere.
 
 ### Calibration knobs
 
-All four live in settings, calibrated against your actual switching rhythm:
+All five live in settings, calibrated against your actual switching rhythm:
 
 * `switch_min_seconds` (~60–120s) — sustained evidence before a switch confirms.
 * `idle_timeout_seconds` (~5–10 min) — the quiet gap that ends a block.
+* `busy_idle_timeout_seconds` (~30 min) — the gap used instead while open work
+is in flight; bounds a lost close signal (settings-file-only, no UI). Never
+shorter in effect than `idle_timeout_seconds`: open work only lengthens a
+source's idle window.
 * `corroborator_confidence_cutoff` (~0.6) — at/above it a signal can drive
 switches; below it only corroborates.
 * `attention_recency_seconds` (~120) — the present-vs-running boundary.
@@ -496,10 +574,11 @@ Two independent axes, both shown per row: **lifecycle** (present / running / —
 as the qualifier after the name, **attention status** (ACTIVE / AWAITING YOU /
 IDLE) as the pill.
 
-Eviction keeps the roster short: a project drops out once it has been `idle`
-past a roster-retention window (longer than the idle timeout — idle rows
-linger, greyed, before disappearing), so the roster is a current list, not a
-growing log. The timeline store stays the durable history; the registry is live
+Eviction keeps the roster short: a source drops out once it has been `idle`
+for one further `idle_timeout_seconds` (measured from the idle flip, so a busy
+row that idles later lingers just the same — idle rows linger, greyed, before
+disappearing), and a project once its last source is gone, so the roster is a
+current list, not a growing log. The timeline store stays the durable history; the registry is live
 state only.
 
 ---
@@ -599,9 +678,10 @@ when only Claude's is on the work.
 * **State timer** — time in the current attention status.
 * **Expand chevron** — reveals the project's live **sources**: each with its
 surface label (`terminal 1`, `chatgpt web`, `claude design`), its own status,
-and its own timer, so a project with three concurrent sessions reads as three
-lines, not one blurred row. Browser source rows are clickable (raise the tab +
-pin focus, §5.5).
+its own timer, and — while a tool call or subagent is in flight — its busy label
+(`· Bash`, `· Explore`; §7 *Open work*), so a project with three concurrent
+sessions reads as three lines, not one blurred row. Browser source rows are
+clickable (raise the tab + pin focus, §5.5).
 
 **Context string** — beside the focused project, a display-only
 `git branch · last commit` line (design: [`docs/context-strings.md`](docs/context-strings.md)).
@@ -785,6 +865,13 @@ I inbox candidates deferred. The §2–§3 non-surveillance constraints are
 retained verbatim — they are load-bearing for the widget identity, not just
 the sensor's. Narrative:
 [`docs/case-study-identity-pivot.md`](docs/case-study-identity-pivot.md).
+10. **Long-running work idling out (2026-10-21)** — **resolved:** idle stays
+silence-based, but a source with *open work* — a turn, tool call, or subagent
+bounded by Claude Code hook pairs — is judged by `busy_idle_timeout_seconds`
+instead (§7 *Open work*). Chosen over a per-tool in-flight flag alone (misses
+long thinking and async agents after the parent's `Stop`) and over any
+heartbeat (none exists). The six extra hook events install alongside the
+original five; older installs are topped up at launch (§5.1).
 
 ---
 

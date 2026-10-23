@@ -30,6 +30,18 @@
 
 {#snippet body()}
   <span class="truncate" style="color: var(--fg3); font-size: 12px;">{source.label}</span>
+  <!-- Open work (§7 "open work"): the tool call / subagent still in flight. It's
+       why a silent row isn't idling out — a long build or an async agent — and
+       it reads as what, not how long: the status dot and timer stay unchanged. -->
+  {#if source.busy}
+    <span
+      class="truncate"
+      style="color: var(--fg3); font-size: 11px; opacity: 0.8;"
+      title="still running — a tool call or subagent is in flight"
+    >
+      · {source.busy}
+    </span>
+  {/if}
   <span class="ml-auto flex shrink-0 items-center gap-3">
     <StatusDot status={source.status} />
     <BlockTimer start={source.statusSince} />

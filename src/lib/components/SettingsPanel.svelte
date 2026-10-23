@@ -693,8 +693,10 @@
     <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
       <p class="label" style="margin-top: 8px;">Claude Code hooks</p>
       <p style="color: var(--fg3); font-size: 11px;">
-        Show <span style="color: var(--fg2);">waiting on you</span> the instant Claude finishes a turn.
-        Writes hooks into <span class="tabular-nums">.claude/settings.json</span> (opt-in, reversible).
+        Show <span style="color: var(--fg2);">waiting on you</span> the instant Claude finishes a turn,
+        and keep a long tool call or a background agent reading as <span style="color: var(--fg2);">running</span>
+        instead of idling out. Writes hooks into <span class="tabular-nums">.claude/settings.json</span>
+        (opt-in, reversible; an older install is topped up at launch).
       </p>
       <!-- One override for everything Claude Code: where transcripts are watched
            AND where hooks install. Auto-discovery handles the common cases (native

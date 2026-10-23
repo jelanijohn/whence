@@ -24,11 +24,12 @@
 //! * **You acted** — `Prompt` / `SessionStart` at full confidence. You're actually
 //!   here. Strongest: opens a block, switches **immediately** (no debounce), and
 //!   marks the block *present*, which *protects* it from weaker signals.
-//! * **Claude worked** — autonomous transcript growth (`ToolUse` / `Active`). High
-//!   confidence in *which* project, low in whether you're watching. Keeps a block
-//!   alive (and can open one from idle), but is *slow* to trigger a switch and
-//!   *never* protects: it can only build a switch candidate once the current block
-//!   has gone *running* (your last prompt aged out).
+//! * **Claude worked** — autonomous transcript growth (`Active`) and the tool /
+//!   subagent start+done pairs (`ToolUse`/`ToolDone`, `AgentStart`/`AgentDone`).
+//!   High confidence in *which* project, low in whether you're watching. Keeps a
+//!   block alive (and can open one from idle), but is *slow* to trigger a switch
+//!   and *never* protects: it can only build a switch candidate once the current
+//!   block has gone *running* (your last prompt aged out).
 //! * **Weak hint** — anything below the corroborator confidence cutoff (terminal
 //!   cwd, Ollama temporal correlation). Only nudges: reinforces whatever's already
 //!   current. It can't open or originate a focus — but on a *running* block a stray
@@ -54,12 +55,39 @@
 //! * **Focus switches** of the active project go through the rules above.
 //! * **Status changes** (`active`/`awaiting_input`/`idle`) land on a session row
 //!   immediately and never move a block boundary.
+//!
+//! ## Open work (busy vs quiet)
+//!
+//! Idle is decided from silence — but a Claude Code session is silent exactly when
+//! its work is long: a 10-minute build writes nothing to the transcript until the
+//! tool result lands, a long thinking stretch nothing until the block completes,
+//! and an async subagent runs on after the parent turn has ended. So each source
+//! keeps a small set of **open work** entries, bounded by hook pairs rather than by
+//! activity: a *turn* (`Prompt` → `AwaitingInput`, Claude Code only — the browser
+//! streams `Active` while it works), a *tool call* (`ToolUse` → `ToolDone`, keyed by
+//! the call id so parallel calls are independent), a *subagent* (`AgentStart` →
+//! `AgentDone`). While any entry is open the source is **busy** and [`tick`] judges
+//! it by the much longer `busy_idle_timeout_seconds` instead of
+//! `idle_timeout_seconds`. No heartbeat is needed: the entries are state. An
+//! `AwaitingInput` says *why* it waits ([`WaitReason`]): a mid-turn wait (permission
+//! prompt) keeps the turn and its pending tool open — the approved tool runs on with
+//! no hook of its own — while a turn-end wait (`Stop`, `idle_prompt`) voids the turn
+//! and any tool entry still open, since a tool that never got its done is an orphan
+//! (an Escape interrupt fires neither `Stop` nor a tool-done). The next prompt
+//! clears orphans too, and the busy timeout bounds whatever is left. A tool event
+//! also proves a turn is in flight, so it (re)opens the turn — hooks installed
+//! mid-session still cover the thinking after the tool. `SessionStart` leaves open
+//! work alone: the transcript watcher emits one when the session's file appears,
+//! which under a polling watcher can land *after* the hook's prompt/tool. Status
+//! and busy are independent: after `Stop` with an agent still running the row reads
+//! *awaiting you* yet stays off the idle path, with the agent's type as its busy
+//! label.
 
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::{Surface, WorkEvent, WorkKind};
+use crate::adapters::{Surface, WaitReason, WorkEvent, WorkKind};
 
 /// Tunables (surfaced in settings; calibrate the debounce on real data).
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +98,12 @@ pub struct SegmentConfig {
     /// No qualifying events for this long ends the active block (status → idle; the
     /// gap is attributed to no project). Start ~300–600s.
     pub idle_timeout_seconds: i64,
+    /// The silence a source with *open work* (a turn, tool call, or subagent in
+    /// flight — see the module doc) is allowed before it's judged idle anyway. Much
+    /// longer than `idle_timeout_seconds`: it bounds a *lost* close signal, not
+    /// normal work. ~1800s. Never shorter in effect than `idle_timeout_seconds`
+    /// (open work can only lengthen a source's idle window, never cut it).
+    pub busy_idle_timeout_seconds: i64,
     /// Confidence at or above this is *primary* evidence (can open a block / drive a
     /// switch); below it the event is a *weak hint* — it only corroborates the
     /// current focus (and, on a *running* block, can drop it). ~0.6. Tracks the
@@ -86,19 +120,19 @@ impl Default for SegmentConfig {
         Self {
             switch_min_seconds: 90,
             idle_timeout_seconds: 360,
+            busy_idle_timeout_seconds: 1800,
             corroborator_confidence_cutoff: 0.6,
             attention_recency_seconds: 120,
         }
     }
 }
 
-/// How long past going idle a row lingers (as a quiet "idle" row) before it's
-/// dropped entirely, as a multiple of `idle_timeout_seconds`. A session goes idle
-/// at `last_activity + idle_timeout`, then disappears at `last_activity +
-/// MULT * idle_timeout` — so a momentarily-quiet session still shows, but a project
-/// you've truly left doesn't accumulate as a stale row forever. (A `SessionEnd`
-/// hook removes the row at once, regardless.)
-const IDLE_ROW_LINGER_MULT: i64 = 2;
+// An idle row lingers (as a quiet "idle" row) for one further `idle_timeout_seconds`
+// after going idle, then is dropped — so a momentarily-quiet session still shows,
+// but a project you've truly left doesn't accumulate as a stale row forever. The
+// linger is measured from the idle flip (`status_since`), not from last activity,
+// so a *busy* row — which idles later — can never be dropped while still active.
+// (A `SessionEnd` hook removes the row at once, regardless.)
 
 /// Immediate, low-flicker status — surfaced to the widget the instant it changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +190,11 @@ pub struct SourceSnapshot {
     /// (time-in-status, §9). Unix seconds.
     #[serde(rename = "statusSince")]
     pub status_since: i64,
+    /// The label of the most recently opened tool call / subagent still in flight on
+    /// this source (`"Bash"`, `"Explore"`) — the widget's "still running" hint.
+    /// `None` when nothing but a bare turn (or nothing at all) is open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub busy: Option<String>,
 }
 
 /// One project row in the roster (§9). One per project that currently has a live or
@@ -212,6 +251,31 @@ struct SourceState {
     status: Status,
     /// When the current status began — the source's time-in-status timer base.
     status_since: i64,
+    /// Units of work currently open on this source (module doc "Open work"), keyed
+    /// `turn` / `tool:<id>` / `agent:<id>`. Non-empty = *busy*: judged by the long
+    /// busy timeout rather than the idle timeout.
+    open_work: BTreeMap<String, OpenWork>,
+    /// Opening-order counter for `open_work` (see [`OpenWork::seq`]).
+    next_work_seq: u64,
+}
+
+/// One open unit of work on a source: its opening order and display label.
+#[derive(Debug, Clone)]
+struct OpenWork {
+    /// Position in this source's opening order. Events carry whole seconds, so
+    /// parallel tool calls dispatched together tie on time — the sequence is what
+    /// says which opened *last* (the one the row shows).
+    seq: u64,
+    label: Option<String>,
+}
+
+/// The open-work key of a Claude Code turn (`Prompt` → `AwaitingInput`).
+const TURN_KEY: &str = "turn";
+
+/// The open-work key for a tool call / subagent: `<prefix>:<id>`, with a single
+/// shared slot when the surface carried no id.
+fn work_key(prefix: &str, ev: &WorkEvent) -> String {
+    format!("{prefix}:{}", ev.work_id.as_deref().unwrap_or("?"))
 }
 
 impl SourceState {
@@ -221,6 +285,122 @@ impl SourceState {
             .clone()
             .unwrap_or_else(|| surface_label(self.surface).to_string())
     }
+
+    fn is_busy(&self) -> bool {
+        !self.open_work.is_empty()
+    }
+
+    /// The silence after which this source is judged idle: the long busy timeout
+    /// while work is open, the normal idle timeout otherwise. Clamped so that open
+    /// work never *shortens* the window — a user who set a one-hour idle timeout and
+    /// never saw the busy knob keeps their hour.
+    fn idle_after(&self, cfg: &SegmentConfig) -> i64 {
+        if self.is_busy() {
+            cfg.busy_idle_timeout_seconds.max(cfg.idle_timeout_seconds)
+        } else {
+            cfg.idle_timeout_seconds
+        }
+    }
+
+    /// The "still running" hint: the label of the most recently opened tool call or
+    /// subagent. A bare turn has no label — the status dot already says *active*.
+    fn busy_label(&self) -> Option<String> {
+        self.open_work
+            .iter()
+            .filter(|(k, _)| k.as_str() != TURN_KEY)
+            .max_by_key(|(_, w)| w.seq)
+            .and_then(|(_, w)| w.label.clone())
+    }
+
+    /// Open/close work per the event's kind. Returns whether the displayed busy
+    /// label changed (so the caller can mark the snapshot dirty).
+    fn note_open_work(&mut self, ev: &WorkEvent) -> bool {
+        let before = self.busy_label();
+        match ev.kind {
+            // A prompt opens a turn — Claude Code only: the browser emits `Active`
+            // while streaming and `AwaitingInput` when done, so its turns are never
+            // silent, and a tab closed mid-stream must not pin a busy row. A new turn
+            // also means the previous turn's tool calls are over (a lost done can't
+            // outlive the turn); agents may run across turns and close on their own.
+            WorkKind::Prompt => {
+                if ev.surface == Surface::ClaudeCode {
+                    let turn = self.new_work(None);
+                    self.open_work.insert(TURN_KEY.to_string(), turn);
+                }
+                self.open_work.retain(|k, _| !k.starts_with("tool:"));
+            }
+            // A mid-turn wait (`permission_prompt`, `elicitation_dialog`) pauses the
+            // turn on you: `PreToolUse` fired *before* the prompt and the approved tool
+            // then runs with no hook of its own, so the turn and the pending tool stay
+            // open — they're what cover that stretch and the thinking after it. A
+            // turn-end wait (`Stop`, `StopFailure`, `idle_prompt`; or a surface that
+            // can't say) voids the turn and any tool still open — a tool with no done
+            // by then was interrupted. Agents outlive turns and close on their own.
+            WorkKind::AwaitingInput => {
+                if ev.wait != Some(WaitReason::MidTurn) {
+                    self.open_work.remove(TURN_KEY);
+                    self.open_work.retain(|k, _| !k.starts_with("tool:"));
+                }
+            }
+            // A tool call proves a turn is in flight — (re)open it, so a session whose
+            // prompt Whence never saw (hooks installed mid-turn) is still covered
+            // through the thinking after the tool. Background tools return at once
+            // (their done fires on dispatch), so a done never implies a stale turn.
+            WorkKind::ToolUse => {
+                self.ensure_turn(ev);
+                let work = self.new_work(ev.work_label.clone());
+                self.open_work.insert(work_key("tool", ev), work);
+            }
+            WorkKind::ToolDone => {
+                self.ensure_turn(ev);
+                close_work(&mut self.open_work, "tool", ev);
+            }
+            WorkKind::AgentStart => {
+                let work = self.new_work(ev.work_label.clone());
+                self.open_work.insert(work_key("agent", ev), work);
+            }
+            WorkKind::AgentDone => close_work(&mut self.open_work, "agent", ev),
+            // An explicit idle means nothing is running. `SessionStart` is *not* a
+            // reset: the transcript watcher emits one when the session's file is
+            // created, and under a polling watcher that lands up to a couple of seconds
+            // late — after the hook's prompt or first tool — so clearing here would
+            // void live work. A genuinely dead session's leftovers are bounded by the
+            // busy timeout and cleared by the next prompt or turn-end wait anyway.
+            WorkKind::Idle => self.open_work.clear(),
+            WorkKind::SessionStart
+            | WorkKind::Active
+            | WorkKind::Select
+            | WorkKind::SessionEnd => {}
+        }
+        self.busy_label() != before
+    }
+
+    /// Open the turn if it isn't already (Claude Code only — see `Prompt`). An
+    /// existing turn keeps its place in the order.
+    fn ensure_turn(&mut self, ev: &WorkEvent) {
+        if ev.surface == Surface::ClaudeCode && !self.open_work.contains_key(TURN_KEY) {
+            let turn = self.new_work(None);
+            self.open_work.insert(TURN_KEY.to_string(), turn);
+        }
+    }
+
+    /// Mint the next entry in opening order.
+    fn new_work(&mut self, label: Option<String>) -> OpenWork {
+        let seq = self.next_work_seq;
+        self.next_work_seq += 1;
+        OpenWork { seq, label }
+    }
+}
+
+/// Close the `<prefix>:<id>` entry a done event names; a done with no id closes
+/// every entry of that prefix (the surface can't say which, so none is in flight).
+fn close_work(open: &mut BTreeMap<String, OpenWork>, prefix: &str, ev: &WorkEvent) {
+    match ev.work_id.as_deref() {
+        Some(id) => {
+            open.remove(&format!("{prefix}:{id}"));
+        }
+        None => open.retain(|k, _| !k.starts_with(&format!("{prefix}:"))),
+    }
 }
 
 /// Per-project display state: the set of live sources under one project, keyed by
@@ -229,17 +409,47 @@ impl SourceState {
 #[derive(Debug, Clone)]
 struct ProjectState {
     sources: BTreeMap<String, SourceState>,
+    /// The latest `last_activity` of any source since removed from `sources` (dropped
+    /// after lingering idle, or ended). Sources idle on their own clocks — a quiet
+    /// browser tab can be swept away while a busy Claude Code session on the same
+    /// project holds the block open for 30 minutes — and the block's end must still
+    /// be the project's last real evidence, not the busy survivor's older activity.
+    evicted_last_activity: Option<i64>,
 }
 
 impl ProjectState {
     fn new() -> Self {
-        Self { sources: BTreeMap::new() }
+        Self { sources: BTreeMap::new(), evicted_last_activity: None }
     }
 
-    /// The most recent activity across all sources — the project's liveness for the
-    /// idle/block-close logic. `None` if it somehow has no sources.
+    /// The most recent activity across all sources, evicted ones included — where
+    /// the project's block ends when it closes. `None` if nothing was ever seen.
     fn last_activity(&self) -> Option<i64> {
-        self.sources.values().map(|s| s.last_activity).max()
+        self.sources
+            .values()
+            .map(|s| s.last_activity)
+            .chain(self.evicted_last_activity)
+            .max()
+    }
+
+    /// Remove a source, keeping its activity as evidence for the block end.
+    fn evict(&mut self, key: &str) -> bool {
+        match self.sources.remove(key) {
+            Some(s) => {
+                self.evicted_last_activity =
+                    self.evicted_last_activity.max(Some(s.last_activity));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Has every source gone quiet past its own threshold (busy sources get the
+    /// long one)? The block-close test. A sourceless project is stale.
+    fn is_stale(&self, now: i64, cfg: &SegmentConfig) -> bool {
+        self.sources
+            .values()
+            .all(|s| now - s.last_activity >= s.idle_after(cfg))
     }
 
     /// Attention-priority roll-up: ACTIVE beats AWAITING beats IDLE (§9 ordering).
@@ -299,6 +509,7 @@ impl ProjectState {
                     label,
                     status: s.status,
                     status_since: s.status_since,
+                    busy: s.busy_label(),
                 }
             })
             .collect()
@@ -473,7 +684,7 @@ impl Segmenter {
                 let Some(proj) = self.projects.get_mut(&project) else {
                     return finish(effects, dirty);
                 };
-                if proj.sources.remove(&key).is_some() {
+                if proj.evict(&key) {
                     dirty = true;
                 }
                 proj.sources.is_empty()
@@ -526,6 +737,8 @@ impl Segmenter {
                                 last_activity: ts,
                                 status: Status::Active,
                                 status_since: ts,
+                                open_work: BTreeMap::new(),
+                                next_work_seq: 0,
                             },
                         );
                         dirty = true;
@@ -556,6 +769,9 @@ impl Segmenter {
             WorkKind::SessionStart
                 | WorkKind::Prompt
                 | WorkKind::ToolUse
+                | WorkKind::ToolDone
+                | WorkKind::AgentStart
+                | WorkKind::AgentDone
                 | WorkKind::Active
                 | WorkKind::AwaitingInput
                 | WorkKind::Select
@@ -564,9 +780,19 @@ impl Segmenter {
         let desired = match ev.kind {
             WorkKind::AwaitingInput => Some(Status::AwaitingInput),
             WorkKind::Idle => Some(Status::Idle),
-            WorkKind::Prompt | WorkKind::ToolUse | WorkKind::SessionStart | WorkKind::Select => {
-                Some(Status::Active)
-            }
+            // `AgentDone` lifts an `AwaitingInput` parent on purpose: a finished
+            // background agent wakes the parent with a completion notification, which
+            // Claude Code delivers through `UserPromptSubmit` (hooks.rs
+            // `is_synthetic_prompt`) — a `Prompt` → `Active` follows a beat later
+            // regardless. `ToolDone` likewise: the approved tool's result resumes the
+            // turn (the generic `Active` guard below can't see that).
+            WorkKind::Prompt
+            | WorkKind::ToolUse
+            | WorkKind::ToolDone
+            | WorkKind::AgentStart
+            | WorkKind::AgentDone
+            | WorkKind::SessionStart
+            | WorkKind::Select => Some(Status::Active),
             // Generic activity is a *weak* active signal — but only on Claude Code,
             // where a turn ends with the `Stop` hook setting awaiting_input and the
             // trailing end-of-turn transcript write lands a beat later as a generic
@@ -594,6 +820,7 @@ impl Segmenter {
             match proj.sources.get_mut(&key) {
                 Some(s) => {
                     s.last_activity = ts;
+                    dirty |= s.note_open_work(ev);
                     if let Some(st) = desired {
                         if s.status != st {
                             s.status = st;
@@ -612,8 +839,11 @@ impl Segmenter {
                             last_activity: ts,
                             status: desired.unwrap_or(Status::Active),
                             status_since: ts,
+                            open_work: BTreeMap::new(),
+                            next_work_seq: 0,
                         },
                     );
+                    proj.sources.get_mut(&key).unwrap().note_open_work(ev);
                     dirty = true;
                 }
             }
@@ -621,7 +851,9 @@ impl Segmenter {
             self.projects.get_mut(&project).and_then(|p| p.sources.get_mut(&key))
         {
             // Idle for a tracked source: mark it idle, but don't refresh activity
-            // (idle means *no* activity — let the idle-row timeout run).
+            // (idle means *no* activity — let the idle-row timeout run). Nothing is
+            // running either, so any open work is void.
+            s.note_open_work(ev);
             if let Some(st) = desired {
                 if s.status != st {
                     s.status = st;
@@ -712,14 +944,16 @@ impl Segmenter {
     pub fn tick(&mut self, now: i64) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut dirty = false;
-        let idle = self.config.idle_timeout_seconds;
+        let cfg = self.config;
 
-        // Close the active block once the active session goes idle (its evidence
-        // stops). The row itself stays (now a quiet "idle" row) until it's dropped.
+        // Close the active block once every source of the active project has gone
+        // quiet past its own threshold (a busy source — open turn/tool/agent — gets
+        // the long one). The row itself stays (now a quiet "idle" row) until dropped.
         if let Some(active) = self.active.clone() {
             let stale = self
-                .project_last_activity(&active)
-                .map(|la| now - la >= idle)
+                .projects
+                .get(&active)
+                .map(|p| p.is_stale(now, &cfg))
                 .unwrap_or(true);
             if stale {
                 if let Some(closed) = self.close_active() {
@@ -734,17 +968,21 @@ impl Segmenter {
         for (slug, proj) in self.projects.iter_mut() {
             let mut drop_sources = Vec::new();
             for (key, s) in proj.sources.iter_mut() {
-                let quiet = now - s.last_activity;
-                if quiet >= idle * IDLE_ROW_LINGER_MULT {
-                    drop_sources.push(key.clone());
-                } else if quiet >= idle && s.status != Status::Idle {
+                if s.status == Status::Idle {
+                    // Linger one idle timeout past the idle flip, then drop.
+                    if now - s.status_since >= cfg.idle_timeout_seconds {
+                        drop_sources.push(key.clone());
+                    }
+                } else if now - s.last_activity >= s.idle_after(&cfg) {
+                    // Silence won — whatever work was open is dead, not running.
                     s.status = Status::Idle;
                     s.status_since = now;
+                    s.open_work.clear();
                     dirty = true;
                 }
             }
             for key in drop_sources {
-                proj.sources.remove(&key);
+                proj.evict(&key);
                 dirty = true;
             }
             if proj.sources.is_empty() {
@@ -851,6 +1089,9 @@ mod tests {
             kind: WorkKind::Active,
             confidence: 1.0,
             detail: None,
+            work_id: None,
+            work_label: None,
+            wait: None,
         }
     }
 
@@ -864,6 +1105,9 @@ mod tests {
             kind,
             confidence: 1.0,
             detail: None,
+            work_id: None,
+            work_label: None,
+            wait: None,
         }
     }
 
@@ -931,6 +1175,328 @@ mod tests {
             .find(|x| x.project == project)
             .map(|x| x.sources.into_iter().map(|src| src.label).collect())
             .unwrap_or_default()
+    }
+
+    /// An open-work start/done event (`ToolUse`/`ToolDone`/`AgentStart`/`AgentDone`)
+    /// on the default (un-keyed) Claude Code source of `project`.
+    fn work_ev(
+        secs: i64,
+        project: &str,
+        kind: WorkKind,
+        id: Option<&str>,
+        label: Option<&str>,
+    ) -> WorkEvent {
+        WorkEvent {
+            work_id: id.map(str::to_string),
+            work_label: label.map(str::to_string),
+            ..status_ev(secs, project, kind)
+        }
+    }
+
+    /// An `AwaitingInput` with its reason — what the hooks adapter emits.
+    fn wait_ev(secs: i64, project: &str, wait: WaitReason) -> WorkEvent {
+        WorkEvent { wait: Some(wait), ..status_ev(secs, project, WorkKind::AwaitingInput) }
+    }
+
+    /// The busy label of a project's first source row, if any.
+    fn busy_of(s: &Segmenter, project: &str) -> Option<String> {
+        s.snapshot()
+            .projects
+            .into_iter()
+            .find(|x| x.project == project)
+            .and_then(|x| x.sources.into_iter().next())
+            .and_then(|src| src.busy)
+    }
+
+    // ---- open work: a silent session with a turn / tool / agent in flight is busy,
+    // not idle (module doc "Open work").
+
+    #[test]
+    fn open_turn_holds_status_and_block_past_idle_timeout() {
+        // You prompted; Claude is thinking / running a long tool. Nothing is written
+        // for 400s — well past the 360s idle timeout — yet the turn is still open.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        // (The tick still reports the present→running flip — only block effects matter.)
+        assert!(closed(&s.tick(400)).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+        assert_eq!(active(&s).as_deref(), Some("waid"));
+        assert_eq!(busy_of(&s, "waid"), None); // a bare turn carries no label
+        // Only the long busy timeout ends it — a lost `Stop` can't pin the row forever.
+        let eff = s.tick(1801);
+        assert_eq!(closed(&eff).len(), 1);
+        assert_eq!(closed(&eff)[0].end, 0);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Idle));
+        assert_eq!(active(&s), None);
+    }
+
+    #[test]
+    fn stop_closes_the_turn_so_normal_idle_resumes() {
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        s.ingest(&status_ev(10, "waid", WorkKind::AwaitingInput)); // Stop
+        let eff = s.tick(400);
+        assert_eq!(closed(&eff).len(), 1);
+        assert_eq!(closed(&eff)[0].end, 10);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Idle));
+    }
+
+    #[test]
+    fn open_tool_survives_a_permission_wait() {
+        // PreToolUse fires *before* the permission prompt; after you approve, the
+        // long tool runs with no hook of its own. The open tool entry is what keeps
+        // the row off the idle path through that silence.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        s.ingest(&work_ev(5, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&wait_ev(6, "waid", WaitReason::MidTurn)); // permission_prompt
+        assert_eq!(status_of(&s, "waid"), Some(Status::AwaitingInput));
+        assert!(closed(&s.tick(400)).is_empty()); // approved + running: silent, not idle
+        assert_eq!(active(&s).as_deref(), Some("waid"));
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+        // The tool finishes: active again, label gone — and the turn is still open
+        // (no Stop yet), so a long silent think after the result doesn't idle either.
+        let done = s.ingest(&work_ev(500, "waid", WorkKind::ToolDone, Some("a"), None));
+        assert_eq!(done, vec![Effect::SnapshotDirty]);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+        assert_eq!(busy_of(&s, "waid"), None);
+        assert!(closed(&s.tick(900)).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+        // Stop; normal idle resumes.
+        s.ingest(&wait_ev(1000, "waid", WaitReason::TurnEnd));
+        let eff = s.tick(1400);
+        assert_eq!(closed(&eff)[0].end, 1000);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Idle));
+    }
+
+    #[test]
+    fn turn_end_wait_clears_an_orphaned_tool_but_not_an_agent() {
+        // Escape mid-tool: no PostToolUseFailure ever comes. The idle_prompt a minute
+        // later says the turn is over — the orphan goes, the normal idle path resumes.
+        // An agent (async, outliving turns) is untouched by the same wait.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        s.ingest(&work_ev(5, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&work_ev(6, "waid", WorkKind::AgentStart, Some("x"), Some("Explore")));
+        s.ingest(&wait_ev(70, "waid", WaitReason::TurnEnd)); // idle_prompt
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Explore")); // Bash is gone
+        s.ingest(&work_ev(80, "waid", WorkKind::AgentDone, Some("x"), None));
+        assert_eq!(busy_of(&s, "waid"), None);
+        let eff = s.tick(450);
+        assert_eq!(closed(&eff)[0].end, 80);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Idle));
+    }
+
+    #[test]
+    fn an_unreasoned_wait_counts_as_turn_end() {
+        // A surface that can't say why it waits (the browser) ends the turn.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        s.ingest(&work_ev(5, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&status_ev(10, "waid", WorkKind::AwaitingInput)); // wait: None
+        assert_eq!(busy_of(&s, "waid"), None);
+        assert_eq!(closed(&s.tick(400))[0].end, 10);
+    }
+
+    #[test]
+    fn tool_events_reopen_a_turn_whence_never_saw() {
+        // Hooks installed (or Whence launched) mid-turn: no Prompt arrived. The tool
+        // pair still proves a turn is in flight, so the silent think after the tool's
+        // result stays off the idle path until Stop.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, Some("a"), Some("Read")));
+        s.ingest(&work_ev(2, "waid", WorkKind::ToolDone, Some("a"), None));
+        assert_eq!(busy_of(&s, "waid"), None);
+        assert!(closed(&s.tick(400)).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+        s.ingest(&wait_ev(500, "waid", WaitReason::TurnEnd));
+        assert_eq!(closed(&s.tick(900))[0].end, 500);
+    }
+
+    #[test]
+    fn transcript_create_after_a_tool_start_keeps_it_busy() {
+        // The transcript watcher emits SessionStart when the session's JSONL appears;
+        // under a 2 s polling watcher that lands after the hook's PreToolUse on the
+        // same source. It must not void the live work.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        s.ingest(&work_ev(1, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&status_ev(2, "waid", WorkKind::SessionStart)); // file created
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+        assert!(closed(&s.tick(400)).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+    }
+
+    #[test]
+    fn evicted_quiet_source_still_bounds_the_block_end() {
+        // Claude Code is busy (a tool in flight since t=0, judged by the 30-minute
+        // timeout); a browser tab on the same project was last active at t=600 and
+        // idles on the normal clock: idle at 960, swept away at 1320. When the busy
+        // source finally goes stale at 1800 the block must end at the project's last
+        // real evidence (600), not at the survivor's older activity (0).
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&WorkEvent {
+            surface: Surface::Browser,
+            source: Some("https://claude.ai/chat/1".into()),
+            ..ev(600, "waid")
+        });
+        assert!(closed(&s.tick(960)).is_empty());
+        assert!(closed(&s.tick(1320)).is_empty());
+        assert_eq!(s.snapshot().projects[0].sources.len(), 1); // browser row gone
+        let eff = s.tick(1800);
+        let block = &closed(&eff)[0];
+        assert_eq!((block.start, block.end), (0, 600));
+    }
+
+    #[test]
+    fn ended_source_still_bounds_the_block_end() {
+        // Same for an explicit SessionEnd of a non-last source.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&WorkEvent { source: Some("other".into()), ..ev(300, "waid") });
+        s.ingest(&WorkEvent {
+            source: Some("other".into()),
+            ..status_ev(310, "waid", WorkKind::SessionEnd)
+        });
+        assert_eq!((closed(&s.tick(1800))[0]).end, 300);
+    }
+
+    #[test]
+    fn agent_keeps_source_busy_after_the_parent_turn_stops() {
+        // An async agent: the parent turn ends (Stop → awaiting you) while the agent
+        // works on for many minutes. Status says awaiting; busy says Explore; no idle.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&status_ev(0, "waid", WorkKind::Prompt));
+        s.ingest(&work_ev(5, "waid", WorkKind::AgentStart, Some("x"), Some("Explore")));
+        s.ingest(&status_ev(10, "waid", WorkKind::AwaitingInput)); // Stop
+        assert!(closed(&s.tick(400)).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::AwaitingInput));
+        assert_eq!(active(&s).as_deref(), Some("waid"));
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Explore"));
+        s.ingest(&work_ev(1000, "waid", WorkKind::AgentDone, Some("x"), None));
+        assert_eq!(busy_of(&s, "waid"), None);
+        let eff = s.tick(1370);
+        assert_eq!(closed(&eff)[0].end, 1000);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Idle));
+    }
+
+    #[test]
+    fn parallel_tools_stay_busy_until_the_last_done() {
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolUse, Some("a"), Some("Read")));
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolUse, Some("b"), Some("Bash")));
+        s.ingest(&work_ev(20, "waid", WorkKind::ToolDone, Some("a"), None));
+        assert!(s.tick(400).is_empty()); // b still running
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+        s.ingest(&work_ev(500, "waid", WorkKind::ToolDone, Some("b"), None));
+        assert_eq!(busy_of(&s, "waid"), None);
+        // (The tool pair opened a turn; Stop ends it, then normal idle resumes.)
+        s.ingest(&wait_ev(510, "waid", WaitReason::TurnEnd));
+        let eff = s.tick(870);
+        assert_eq!(closed(&eff)[0].end, 510);
+    }
+
+    #[test]
+    fn busy_timeout_bounds_a_lost_close_signal_then_row_lingers_and_drops() {
+        // A tool whose done never arrives (an Escape interrupt fires none): the row
+        // stays busy only until the busy timeout of *silence*, then idles, lingers
+        // one idle timeout as a quiet row, and drops.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        assert!(s.tick(1000).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+        let eff = s.tick(1811);
+        assert_eq!(closed(&eff)[0].end, 10);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Idle));
+        assert_eq!(busy_of(&s, "waid"), None); // silence voided the open work
+        assert!(s.tick(1811 + 359).is_empty());
+        assert_eq!(projects(&s), vec!["waid"]);
+        s.tick(1811 + 360);
+        assert!(projects(&s).is_empty());
+    }
+
+    #[test]
+    fn prompt_clears_stale_tools_but_not_agents() {
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&work_ev(1, "waid", WorkKind::AgentStart, Some("x"), Some("Plan")));
+        // A new turn: the old turn's tool call is over whatever we heard; the agent
+        // runs across turns. Then Stop: the agent alone keeps the row busy.
+        s.ingest(&status_ev(100, "waid", WorkKind::Prompt));
+        s.ingest(&status_ev(110, "waid", WorkKind::AwaitingInput));
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Plan"));
+        assert!(closed(&s.tick(500)).is_empty());
+        s.ingest(&work_ev(600, "waid", WorkKind::AgentDone, Some("x"), None));
+        assert_eq!(closed(&s.tick(961)).len(), 1);
+    }
+
+    #[test]
+    fn same_second_starts_show_the_latest_not_the_highest_key() {
+        // Two tool calls dispatched in one second, with ids that sort the other
+        // way: the row shows the one that opened *last*, and the second start still
+        // pushes a snapshot even though the row was already active.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolUse, Some("z"), Some("Bash")));
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+        let eff = s.ingest(&work_ev(10, "waid", WorkKind::ToolUse, Some("a"), Some("Read")));
+        assert_eq!(eff, vec![Effect::SnapshotDirty]);
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Read"));
+        // Closing the latest falls back to the one still open, whatever its key.
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolDone, Some("a"), None));
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn busy_timeout_never_shortens_a_longer_idle_timeout() {
+        // An hour-long idle timeout (set in the UI) with the default, unseen 30-minute
+        // busy knob: a source with open work must still get the hour.
+        let mut s = Segmenter::new(SegmentConfig {
+            idle_timeout_seconds: 3600,
+            ..SegmentConfig::default()
+        });
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        assert!(closed(&s.tick(3599)).is_empty());
+        assert_eq!(status_of(&s, "waid"), Some(Status::Active));
+        assert_eq!(closed(&s.tick(3600)).len(), 1);
+    }
+
+    #[test]
+    fn tool_done_without_id_clears_every_tool() {
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        s.ingest(&work_ev(0, "waid", WorkKind::ToolUse, None, Some("Grep")));
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolDone, None, None));
+        assert_eq!(busy_of(&s, "waid"), None);
+        s.ingest(&wait_ev(20, "waid", WaitReason::TurnEnd));
+        assert_eq!(closed(&s.tick(381)).len(), 1);
+    }
+
+    #[test]
+    fn browser_prompt_opens_no_turn() {
+        // The browser streams `Active` while the model works, so its turns are never
+        // silent; a tab closed mid-stream must not pin a 30-minute busy row.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        let mut p = status_ev(0, "waid", WorkKind::Prompt);
+        p.surface = Surface::Browser;
+        p.source = Some("https://claude.ai/chat/1".into());
+        s.ingest(&p);
+        assert_eq!(closed(&s.tick(361)).len(), 1);
+        assert_eq!(status_of(&s, "waid"), Some(Status::Idle));
+    }
+
+    #[test]
+    fn tool_start_on_an_active_row_still_pushes_a_snapshot() {
+        // Status is unchanged (active → active) but the busy label appeared — the
+        // widget must hear about it.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "waid"));
+        let eff = s.ingest(&work_ev(1, "waid", WorkKind::ToolUse, Some("a"), Some("Bash")));
+        assert_eq!(eff, vec![Effect::SnapshotDirty]);
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+        // Same label again (a second Bash call) → nothing displayed changes → no push.
+        let eff = s.ingest(&work_ev(2, "waid", WorkKind::ToolUse, Some("b"), Some("Bash")));
+        assert!(eff.is_empty());
     }
 
     #[test]
@@ -1219,6 +1785,9 @@ mod tests {
             kind: WorkKind::Active,
             confidence: 0.4,
             detail: None,
+            work_id: None,
+            work_label: None,
+            wait: None,
         }
     }
 
@@ -1329,6 +1898,9 @@ mod tests {
             kind: WorkKind::Active,
             confidence: 1.0,
             detail: None,
+            work_id: None,
+            work_label: None,
+            wait: None,
         }
     }
 

@@ -78,6 +78,9 @@ pub fn cwd_to_event(
         kind: WorkKind::Active,
         confidence: CWD_CONFIDENCE,
         detail: Some(format!("cwd: {cwd}")),
+        work_id: None,
+        work_label: None,
+        wait: None,
     })
 }
 

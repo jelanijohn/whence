@@ -46,6 +46,7 @@ const focusSnapshot: FocusSnapshot = {
           label: "claude code",
           status: "active",
           statusSince: NOW - 1112,
+          busy: "Bash", // a long tool call in flight — the row stays off the idle path
         },
         {
           surface: "browser",
@@ -172,6 +173,7 @@ const settings: Settings = {
   contextBrowserTitles: false,
   switchMinSeconds: 90,
   idleTimeoutSeconds: 360,
+  busyIdleTimeoutSeconds: 1800,
   corroboratorConfidenceCutoff: 0.6,
   attentionRecencySeconds: 120,
   widgetOpacity: 1.0,

@@ -61,6 +61,11 @@ design:
   - The widget shows `present` vs `running` so it never implies your attention when only an LLM is on the
     work.
 - **Status ≠ focus.** `active` / `awaiting_input` / `idle` are shown for your convenience. It moves a block boundary.
+- **Busy ≠ quiet.** A Claude Code session with a turn, tool call, or subagent
+  in flight (bounded by hook pairs, not activity) idles on
+  `busy_idle_timeout_seconds` (~30 min of silence) instead of
+  `idle_timeout_seconds` — a long build or background agent stays `running`
+  (spec §7).
 - **One focus, many rows.** The widget is a roster of every live project —
   each row expandable to its concurrent sources (sessions, tabs, terminals) —
   but only the single focused project is attributed, so persisted blocks never
@@ -78,7 +83,7 @@ changes. Details for each in spec §5.
 | Surface | Signal | Role | Default |
 |---|---|---|---|
 | Claude Code transcripts | `~/.claude/projects/**/*.jsonl` watch | attribution (primary) | on, zero-config |
-| Claude Code hooks | native `http` hooks → `127.0.0.1:18450` | live `awaiting_input` status | opt-in install |
+| Claude Code hooks | native `http` hooks → `127.0.0.1:18450` | live `awaiting_input` status; turn / tool / subagent bounds so long work never reads idle | opt-in install |
 | Browser LLM | MV3 extension (`extension/`) → `127.0.0.1:18452` | originating attribution — claude.ai chat + Design, chatgpt.com | opt-in |
 | Terminal cwd | shell hook POST → `127.0.0.1:18451` | weak corroborator | opt-in |
 | Ollama | `/api/ps` poll | unattributed liveness status | opt-in |
@@ -90,7 +95,8 @@ Worth knowing:
   polling watcher.
 - Hook install/uninstall is a Settings button doing a merge-preserving
   round-trip of `.claude/settings.json`; the receiver token rides in the hook
-  URL, and rotation rewrites installed hooks.
+  URL, rotation rewrites installed hooks, and an install from an older Whence
+  (fewer events) is topped up at launch.
 - The extension reads only project-scoped URLs and the provider's project
   id/name — never chat content or tab focus. The provider→slug map is
   hand-editable TOML. Browser source rows are clickable: raise the tab and pin

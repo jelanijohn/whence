@@ -34,7 +34,19 @@ pub enum Surface {
 pub enum WorkKind {
     SessionStart,
     Prompt,
+    /// A tool call *started* (Claude Code `PreToolUse`). Autonomous "Claude worked"
+    /// evidence — and the start of a unit of *open work* the engine holds a source
+    /// busy for until the matching [`WorkKind::ToolDone`] (`work_id` pairs them).
     ToolUse,
+    /// A tool call *finished* (`PostToolUse` / `PostToolUseFailure`). Closes the
+    /// open-work entry `ToolUse` opened; otherwise plain autonomous evidence.
+    ToolDone,
+    /// A subagent *started* (`SubagentStart`). Open work on the *parent* source: an
+    /// async agent keeps running after the parent turn ends, so without this the
+    /// parent reads awaiting-then-idle while the agent is still working for you.
+    AgentStart,
+    /// A subagent *finished* (`SubagentStop`) — closes the matching `AgentStart`.
+    AgentDone,
     AwaitingInput,
     Active,
     Idle,
@@ -50,13 +62,17 @@ pub enum WorkKind {
 impl WorkKind {
     /// Does this kind count as *focus evidence* (feeds segmentation), or is it a
     /// pure status signal? `awaiting_input`/`idle` are status-only — they never
-    /// move a focus-block boundary (§7 status-vs-focus split).
+    /// move a focus-block boundary (§7 status-vs-focus split). The tool/agent
+    /// start+done pairs are autonomous "Claude worked" evidence like `Active`.
     pub fn is_focus_evidence(self) -> bool {
         matches!(
             self,
             WorkKind::SessionStart
                 | WorkKind::Prompt
                 | WorkKind::ToolUse
+                | WorkKind::ToolDone
+                | WorkKind::AgentStart
+                | WorkKind::AgentDone
                 | WorkKind::Active
                 | WorkKind::Select
         )
@@ -91,6 +107,36 @@ pub struct WorkEvent {
     /// Optional semantic payload (prompt summary, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// For the open-work kinds (`ToolUse`/`ToolDone`, `AgentStart`/`AgentDone`):
+    /// the hook's `tool_use_id` / `agent_id`, so a *done* is paired with its *start*
+    /// when several run in parallel. `None` = the surface gave no id (the engine then
+    /// treats the kind's work as a single slot). Not on `detail`: the hooks receiver
+    /// records `detail` as a context moment, and the engine must never read `detail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<String>,
+    /// Display label for that unit of work — the tool name (`"Bash"`) or agent type
+    /// (`"Explore"`). Shown on the source row while the work is open; never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_label: Option<String>,
+    /// For `AwaitingInput` only: *why* the source waits. Decides what open work the
+    /// wait voids (`segment.rs` "Open work"). `None` = unknown → treated as `TurnEnd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitReason>,
+}
+
+/// Why a source is `AwaitingInput`. Only the hooks adapter can tell: Claude Code
+/// waits on you both *between* turns and *mid*-turn, and open work must survive the
+/// latter — the approved tool runs on, the turn resumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitReason {
+    /// The turn is over (`Stop`, `StopFailure`) or has been over for a while
+    /// (`idle_prompt`): nothing foreground is running, so the turn and any tool
+    /// entries are void. Agents may run on.
+    TurnEnd,
+    /// The turn is paused on you (`permission_prompt`, `elicitation_dialog`) and
+    /// resumes when you answer: the turn and its tools stay open.
+    MidTurn,
 }
 
 impl WorkEvent {
@@ -287,6 +333,9 @@ mod tests {
             kind: WorkKind::Prompt,
             confidence: 1.0,
             detail: None,
+            work_id: None,
+            work_label: None,
+            wait: None,
         };
         // 2026-06-24T15:00:00Z in unix seconds.
         assert_eq!(e.ts_secs(), Some(1_782_313_200));

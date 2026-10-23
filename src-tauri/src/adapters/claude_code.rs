@@ -238,6 +238,9 @@ fn event_for_path(
         },
         confidence: 1.0, // cwd-derived attribution is high-confidence
         detail: None,
+        work_id: None,
+        work_label: None,
+        wait: None,
     })
 }
 
