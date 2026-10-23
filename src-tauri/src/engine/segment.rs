@@ -254,12 +254,17 @@ struct SourceState {
     /// `turn` / `tool:<id>` / `agent:<id>`. Non-empty = *busy*: judged by the long
     /// busy timeout rather than the idle timeout.
     open_work: BTreeMap<String, OpenWork>,
+    /// Opening-order counter for `open_work` (see [`OpenWork::seq`]).
+    next_work_seq: u64,
 }
 
-/// One open unit of work on a source: when it opened and its display label.
+/// One open unit of work on a source: its opening order and display label.
 #[derive(Debug, Clone)]
 struct OpenWork {
-    since: i64,
+    /// Position in this source's opening order. Events carry whole seconds, so
+    /// parallel tool calls dispatched together tie on time — the sequence is what
+    /// says which opened *last* (the one the row shows).
+    seq: u64,
     label: Option<String>,
 }
 
@@ -300,13 +305,13 @@ impl SourceState {
         self.open_work
             .iter()
             .filter(|(k, _)| k.as_str() != TURN_KEY)
-            .max_by_key(|(_, w)| w.since)
+            .max_by_key(|(_, w)| w.seq)
             .and_then(|(_, w)| w.label.clone())
     }
 
     /// Open/close work per the event's kind. Returns whether the displayed busy
     /// label changed (so the caller can mark the snapshot dirty).
-    fn note_open_work(&mut self, ev: &WorkEvent, ts: i64) -> bool {
+    fn note_open_work(&mut self, ev: &WorkEvent) -> bool {
         let before = self.busy_label();
         match ev.kind {
             // A prompt opens a turn — Claude Code only: the browser emits `Active`
@@ -316,8 +321,8 @@ impl SourceState {
             // outlive the turn); agents may run across turns and close on their own.
             WorkKind::Prompt => {
                 if ev.surface == Surface::ClaudeCode {
-                    self.open_work
-                        .insert(TURN_KEY.to_string(), OpenWork { since: ts, label: None });
+                    let turn = self.new_work(None);
+                    self.open_work.insert(TURN_KEY.to_string(), turn);
                 }
                 self.open_work.retain(|k, _| !k.starts_with("tool:"));
             }
@@ -339,21 +344,17 @@ impl SourceState {
             // through the thinking after the tool. Background tools return at once
             // (their done fires on dispatch), so a done never implies a stale turn.
             WorkKind::ToolUse => {
-                self.ensure_turn(ev, ts);
-                self.open_work.insert(
-                    work_key("tool", ev),
-                    OpenWork { since: ts, label: ev.work_label.clone() },
-                );
+                self.ensure_turn(ev);
+                let work = self.new_work(ev.work_label.clone());
+                self.open_work.insert(work_key("tool", ev), work);
             }
             WorkKind::ToolDone => {
-                self.ensure_turn(ev, ts);
+                self.ensure_turn(ev);
                 close_work(&mut self.open_work, "tool", ev);
             }
             WorkKind::AgentStart => {
-                self.open_work.insert(
-                    work_key("agent", ev),
-                    OpenWork { since: ts, label: ev.work_label.clone() },
-                );
+                let work = self.new_work(ev.work_label.clone());
+                self.open_work.insert(work_key("agent", ev), work);
             }
             WorkKind::AgentDone => close_work(&mut self.open_work, "agent", ev),
             // An explicit idle means nothing is running. `SessionStart` is *not* a
@@ -372,13 +373,19 @@ impl SourceState {
     }
 
     /// Open the turn if it isn't already (Claude Code only — see `Prompt`). An
-    /// existing turn keeps its original `since`.
-    fn ensure_turn(&mut self, ev: &WorkEvent, ts: i64) {
-        if ev.surface == Surface::ClaudeCode {
-            self.open_work
-                .entry(TURN_KEY.to_string())
-                .or_insert(OpenWork { since: ts, label: None });
+    /// existing turn keeps its place in the order.
+    fn ensure_turn(&mut self, ev: &WorkEvent) {
+        if ev.surface == Surface::ClaudeCode && !self.open_work.contains_key(TURN_KEY) {
+            let turn = self.new_work(None);
+            self.open_work.insert(TURN_KEY.to_string(), turn);
         }
+    }
+
+    /// Mint the next entry in opening order.
+    fn new_work(&mut self, label: Option<String>) -> OpenWork {
+        let seq = self.next_work_seq;
+        self.next_work_seq += 1;
+        OpenWork { seq, label }
     }
 }
 
@@ -728,6 +735,7 @@ impl Segmenter {
                                 status: Status::Active,
                                 status_since: ts,
                                 open_work: BTreeMap::new(),
+                                next_work_seq: 0,
                             },
                         );
                         dirty = true;
@@ -809,7 +817,7 @@ impl Segmenter {
             match proj.sources.get_mut(&key) {
                 Some(s) => {
                     s.last_activity = ts;
-                    dirty |= s.note_open_work(ev, ts);
+                    dirty |= s.note_open_work(ev);
                     if let Some(st) = desired {
                         if s.status != st {
                             s.status = st;
@@ -829,9 +837,10 @@ impl Segmenter {
                             status: desired.unwrap_or(Status::Active),
                             status_since: ts,
                             open_work: BTreeMap::new(),
+                            next_work_seq: 0,
                         },
                     );
-                    proj.sources.get_mut(&key).unwrap().note_open_work(ev, ts);
+                    proj.sources.get_mut(&key).unwrap().note_open_work(ev);
                     dirty = true;
                 }
             }
@@ -841,7 +850,7 @@ impl Segmenter {
             // Idle for a tracked source: mark it idle, but don't refresh activity
             // (idle means *no* activity — let the idle-row timeout run). Nothing is
             // running either, so any open work is void.
-            s.note_open_work(ev, ts);
+            s.note_open_work(ev);
             if let Some(st) = desired {
                 if s.status != st {
                     s.status = st;
@@ -1417,6 +1426,22 @@ mod tests {
         assert!(closed(&s.tick(500)).is_empty());
         s.ingest(&work_ev(600, "waid", WorkKind::AgentDone, Some("x"), None));
         assert_eq!(closed(&s.tick(961)).len(), 1);
+    }
+
+    #[test]
+    fn same_second_starts_show_the_latest_not_the_highest_key() {
+        // Two tool calls dispatched in one second, with ids that sort the other
+        // way: the row shows the one that opened *last*, and the second start still
+        // pushes a snapshot even though the row was already active.
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolUse, Some("z"), Some("Bash")));
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
+        let eff = s.ingest(&work_ev(10, "waid", WorkKind::ToolUse, Some("a"), Some("Read")));
+        assert_eq!(eff, vec![Effect::SnapshotDirty]);
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Read"));
+        // Closing the latest falls back to the one still open, whatever its key.
+        s.ingest(&work_ev(10, "waid", WorkKind::ToolDone, Some("a"), None));
+        assert_eq!(busy_of(&s, "waid").as_deref(), Some("Bash"));
     }
 
     #[test]
