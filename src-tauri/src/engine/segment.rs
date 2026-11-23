@@ -229,17 +229,38 @@ impl SourceState {
 #[derive(Debug, Clone)]
 struct ProjectState {
     sources: BTreeMap<String, SourceState>,
+    /// The latest activity of any source that has since *left* the roster (ended,
+    /// dismissed, or idled out). Work a session did doesn't stop having happened
+    /// when the session ends: without this, ending the most recently active source
+    /// rewinds the project's last activity to an older surviving source — closing
+    /// the block too early, or even before its own start.
+    departed_last_activity: Option<i64>,
 }
 
 impl ProjectState {
     fn new() -> Self {
-        Self { sources: BTreeMap::new() }
+        Self { sources: BTreeMap::new(), departed_last_activity: None }
     }
 
-    /// The most recent activity across all sources — the project's liveness for the
-    /// idle/block-close logic. `None` if it somehow has no sources.
+    /// The most recent activity on the project — across its live sources *and* the
+    /// ones that have left — the project's liveness for the idle/block-close logic.
+    /// `None` only if it has never had a source.
     fn last_activity(&self) -> Option<i64> {
-        self.sources.values().map(|s| s.last_activity).max()
+        self.sources
+            .values()
+            .map(|s| s.last_activity)
+            .chain(self.departed_last_activity)
+            .max()
+    }
+
+    /// Remove a source, keeping its last activity on the project's record. Returns
+    /// whether it existed. The only way a source may leave `sources`.
+    fn remove_source(&mut self, key: &str) -> bool {
+        let Some(gone) = self.sources.remove(key) else {
+            return false;
+        };
+        self.departed_last_activity = self.departed_last_activity.max(Some(gone.last_activity));
+        true
     }
 
     /// Attention-priority roll-up: ACTIVE beats AWAITING beats IDLE (§9 ordering).
@@ -471,26 +492,24 @@ impl Segmenter {
         // the same project keeps it attributed.
         if matches!(ev.kind, WorkKind::SessionEnd) {
             let key = source_key(ev);
-            let last_activity;
             let now_empty = {
                 let Some(proj) = self.projects.get_mut(&project) else {
                     return finish(effects, dirty);
                 };
-                // Read the project's last activity *before* removing the source: once
-                // its last source is gone there is nothing left to read it from, and
-                // the block would close at its own start — a zero-length block that
-                // throws away everything accrued.
-                last_activity = proj.last_activity();
-                if proj.sources.remove(&key).is_some() {
+                // `remove_source` keeps the departing source's last activity on the
+                // project, so the close below still ends the block where the work
+                // actually stopped — not at an older surviving source's activity, and
+                // not (with no source left at all) at the block's own start.
+                if proj.remove_source(&key) {
                     dirty = true;
                 }
                 proj.sources.is_empty()
             };
             if now_empty {
-                // The project is sourceless now, so the block ends at the last
-                // activity captured above; then drop the project.
+                // Close while the (now sourceless) project is still in the map so the
+                // block ends at its last activity, then drop the project.
                 if self.active.as_deref() == Some(project.as_str()) {
-                    if let Some(closed) = self.close_active_ending(last_activity) {
+                    if let Some(closed) = self.close_active() {
                         effects.push(closed);
                     }
                 }
@@ -752,7 +771,7 @@ impl Segmenter {
                 }
             }
             for key in drop_sources {
-                proj.sources.remove(&key);
+                proj.remove_source(&key);
                 dirty = true;
             }
             if proj.sources.is_empty() {
@@ -799,19 +818,11 @@ impl Segmenter {
     /// activity (not the call time). Clears the active pointer + accounting. Returns
     /// the `BlockClosed` effect, or `None` if nothing was active.
     fn close_active(&mut self) -> Option<Effect> {
-        self.close_active_ending(None)
-    }
-
-    /// [`close_active`](Self::close_active) for a project whose sources may already
-    /// be gone: `last_activity` is the fallback end when none can be read off the
-    /// project any more (the `SessionEnd` of its last source).
-    fn close_active_ending(&mut self, last_activity: Option<i64>) -> Option<Effect> {
         let project = self.active.take()?;
         let start = self.active_since.take().unwrap_or(0);
-        let end = self
-            .project_last_activity(&project)
-            .or(last_activity)
-            .unwrap_or(start);
+        // Never before the start: a block can't have negative length, whatever the
+        // activity bookkeeping says.
+        let end = self.project_last_activity(&project).unwrap_or(start).max(start);
         let block = FocusBlock {
             project,
             start,
@@ -1172,6 +1183,32 @@ mod tests {
         // Ends at the last real activity — not at the start, and not at the
         // SessionEnd's own (possibly much later) time.
         assert_eq!(block.end - block.start, 40);
+    }
+
+    #[test]
+    fn an_ended_sources_activity_still_counts_toward_the_block() {
+        // Regression: an old source last acted at t=0; a newer one opens the block
+        // at t=20 and works until t=30. Ending the *newer* one first used to rewind
+        // the project's last activity to t=0 — a block ending before it started.
+        let with_source = |secs: i64, id: &str, kind: WorkKind| {
+            let mut e = status_ev(secs, "waid", kind);
+            e.source = Some(id.to_string());
+            e
+        };
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&with_source(0, "old", WorkKind::AwaitingInput)); // a row, no block
+        let open = s.ingest(&with_source(20, "new", WorkKind::Prompt));
+        assert_eq!(opened(&open).len(), 1);
+        s.ingest(&with_source(30, "new", WorkKind::ToolUse));
+
+        // Newest source ends first: the project lives on (old row), block still open.
+        let first = s.ingest(&with_source(35, "new", WorkKind::SessionEnd));
+        assert!(closed(&first).is_empty());
+        // Then the old one: the block closes where the work stopped, t=30.
+        let last = s.ingest(&with_source(40, "old", WorkKind::SessionEnd));
+        let block = &closed(&last)[0];
+        assert!(block.end >= block.start);
+        assert_eq!(block.end - block.start, 10);
     }
 
     #[test]
