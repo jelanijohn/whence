@@ -350,6 +350,10 @@ pub fn serve(
                         .lock()
                         .map(|s| (s.context_strings && s.context_hook_prompts, s.codex_enabled))
                         .unwrap_or((false, false));
+                    // Set when the Codex ordering guard admits a late prompt on
+                    // an already-finished turn: the prompt is sent, then an
+                    // awaiting re-assert (codex::Verdict::AdmitThenAwaiting).
+                    let mut then_awaiting = false;
                     let event = match which {
                         Route::Claude => serde_json::from_str::<HookPayload>(&body)
                             .ok()
@@ -368,7 +372,14 @@ pub fn serve(
                             .ok()
                             // A stale delivery (late tool use after `Stop`, …)
                             // is dropped here, before it can touch a row.
-                            .filter(|payload| codex_turns.admit(payload))
+                            .filter(|payload| match codex_turns.admit(payload) {
+                                codex::Verdict::Admit => true,
+                                codex::Verdict::AdmitThenAwaiting => {
+                                    then_awaiting = true;
+                                    true
+                                }
+                                codex::Verdict::Drop => false,
+                            })
                             .and_then(|payload| {
                                 codex::codex_hook_to_event(&payload, &aliases, &now, capture)
                             }),
@@ -389,7 +400,11 @@ pub fn serve(
                         }
                         // Unbounded send never blocks; an error only means the
                         // core task is gone (shutdown), so dropping is correct.
+                        let followup = then_awaiting.then(|| codex::awaiting_followup(&ev));
                         let _ = tx.send(ev);
+                        if let Some(awaiting) = followup {
+                            let _ = tx.send(awaiting);
+                        }
                     }
                 }
                 let _ = req.respond(tiny_http::Response::empty(200));
@@ -871,5 +886,30 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().kind, WorkKind::AwaitingInput);
         assert!(send("PostToolUse").starts_with("HTTP/1.1 200"), "still accepted");
         assert!(rx.try_recv().is_err(), "late tool use after Stop → dropped");
+
+        // A prompt that lands after its own turn's Stop is still delivered, then
+        // immediately corrected back to awaiting.
+        let send_turn = |event: &str, turn: &str| {
+            let body = format!(
+                r#"{{"hook_event_name":"{event}","session_id":"thr_3","turn_id":"{turn}","cwd":"/w/whence","prompt":"late"}}"#
+            );
+            raw_http(
+                addr,
+                &format!(
+                    "POST /codex HTTP/1.1\r\nHost: whence\r\n{AUTH}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        assert!(send_turn("Stop", "t9").starts_with("HTTP/1.1 200"));
+        assert_eq!(rx.try_recv().unwrap().kind, WorkKind::AwaitingInput);
+        assert!(send_turn("UserPromptSubmit", "t9").starts_with("HTTP/1.1 200"));
+        let prompt = rx.try_recv().expect("late prompt still flows");
+        assert_eq!(prompt.kind, WorkKind::Prompt);
+        assert_eq!(prompt.detail.as_deref(), Some("late"));
+        let follow = rx.try_recv().expect("…followed by the awaiting re-assert");
+        assert_eq!(follow.kind, WorkKind::AwaitingInput);
+        assert_eq!(follow.source.as_deref(), Some("thr_3"));
+        assert_eq!(follow.detail, None);
     }
 }

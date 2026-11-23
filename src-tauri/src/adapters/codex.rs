@@ -57,25 +57,77 @@ pub struct CodexHookPayload {
     pub prompt: Option<String>,
 }
 
+/// What [`TurnGuard`] knows about one turn of a session.
+#[derive(Debug)]
+struct Turn {
+    id: String,
+    /// Its `UserPromptSubmit` has arrived. `false` = we only know the turn from a
+    /// tool event or `Stop` that beat the (backgrounded) prompt hook here.
+    prompted: bool,
+    /// Its `Stop` has arrived (admitted or not).
+    stopped: bool,
+}
+
 /// Per-session ordering state for [`TurnGuard`].
 #[derive(Debug, Default)]
 struct SessionTurns {
-    /// The turn of the latest `UserPromptSubmit`.
+    /// The newest turn we know of — the only one whose tool/stop events may
+    /// touch the row. `None` until a turn id is seen, and again after a prompt
+    /// that carried none (nothing to compare against → everything admitted).
     current: Option<String>,
-    /// The most recently stopped turn.
-    stopped: Option<String>,
+    /// Recent turns, oldest first, bounded by [`TurnGuard::MAX_TURNS`].
+    turns: std::collections::VecDeque<Turn>,
     /// `SessionEnd` seen; only a new prompt or `SessionStart` revives the session.
     ended: bool,
 }
 
-/// Drops out-of-order Codex hook deliveries.
+impl SessionTurns {
+    fn turn_mut(&mut self, id: &str) -> Option<&mut Turn> {
+        self.turns.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Remember a newly-seen turn, evicting the oldest past the bound.
+    fn remember(&mut self, id: &str, prompted: bool, stopped: bool) {
+        if self.turns.len() >= TurnGuard::MAX_TURNS {
+            self.turns.pop_front();
+        }
+        self.turns.push_back(Turn { id: id.to_string(), prompted, stopped });
+    }
+
+    /// Whether the current turn has already stopped (the row should read awaiting).
+    fn current_stopped(&self) -> bool {
+        self.current
+            .as_deref()
+            .and_then(|c| self.turns.iter().find(|t| t.id == c))
+            .is_some_and(|t| t.stopped)
+    }
+}
+
+/// [`TurnGuard::admit`]'s decision for one payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// In order — map it.
+    Admit,
+    /// A prompt that arrived *after* its turn (or a newer one) already stopped.
+    /// Still mapped — it carries the you-acted attribution and the context
+    /// snippet — but the receiver must follow it with an `AwaitingInput` so the
+    /// finished row doesn't read "working" (see [`awaiting_followup`]).
+    AdmitThenAwaiting,
+    /// Out-of-order delivery — drop it.
+    Drop,
+}
+
+/// Orders out-of-order Codex hook deliveries.
 ///
 /// Why this exists: every installed hook is a backgrounded `curl`, so arrival
-/// order is not event order. Unguarded, three races corrupt a row's status:
+/// order is not event order — for *every* event, the prompt included. Unguarded,
+/// these races corrupt a row's status:
 ///
 /// * a late `PostToolUse` landing after its turn's `Stop` flips the row back to
 ///   *active* with nothing left to correct it (the turn is over, no further
 ///   event comes) — it reads "working" until the idle timeout;
+/// * a late `UserPromptSubmit` landing after its own turn's `Stop` (a very
+///   short turn) does the same;
 /// * a late `Stop` landing after the *next* prompt marks a working row
 ///   *awaiting you*;
 /// * anything landing after `SessionEnd` re-creates the row the end just dropped.
@@ -87,20 +139,34 @@ struct SessionTurns {
 /// and it is adapter-native, so the ordering lives here and the engine stays
 /// untouched.
 ///
-/// Rules, per `session_id`:
+/// Model, per `session_id`: a bounded history of recent turns (prompted?
+/// stopped?) and the *current* turn — the newest one known. A turn id never
+/// seen before is by definition newer than everything known, whichever of its
+/// events arrives first, so it becomes current. Rules:
 ///
 /// * `UserPromptSubmit` / `SessionStart` are **never dropped** — they are the
-///   you-acted signals. A prompt records its turn as *current* and reopens that
-///   turn if it was marked stopped, so the guard self-heals even if a runtime
-///   ever reused a `turn_id`.
-/// * `PostToolUse` / `PermissionRequest` for the already-stopped turn → dropped.
-/// * `Stop` for a turn other than the *current* one → dropped (superseded).
+///   you-acted signals.
+///   * first sight of the turn → it becomes current;
+///   * the turn is already known but its prompt wasn't (a tool event or `Stop`
+///     beat it here) → a *late* prompt: mapped, and if the current turn has
+///     already stopped, followed by an awaiting re-assert
+///     ([`Verdict::AdmitThenAwaiting`]);
+///   * the turn's prompt was already seen → a re-prompt on a reused `turn_id`:
+///     the turn reopens and becomes current, so the guard self-heals should a
+///     runtime ever reuse ids;
+///   * no `turn_id` → current is cleared, so the events that follow are
+///     admitted rather than compared against a stale turn.
+/// * `PostToolUse` / `PermissionRequest` → dropped if their turn has stopped or
+///   has been superseded by a newer current turn.
+/// * `Stop` → always *recorded* on its turn; dropped if that turn is no longer
+///   current (superseded), so its stragglers are still recognised later.
 /// * After `SessionEnd`, everything but a prompt or `SessionStart` → dropped.
 ///
 /// Every rule needs the ids it compares to be present; a payload without
-/// `session_id` — or a turn rule without `turn_id` on both sides — is admitted
-/// unchanged, i.e. the guard degrades to the unguarded behaviour, never to
-/// dropping live signal.
+/// `session_id`, or a turn-scoped event without `turn_id`, is admitted
+/// unchanged — the guard degrades to the unguarded behaviour, never to dropping
+/// live signal. A turn evicted from the bounded history is likewise treated as
+/// unseen.
 ///
 /// Pure: no I/O, no clock. Owned by the receiver thread (`hooks::serve`), which
 /// handles requests one at a time, so it needs no lock.
@@ -113,12 +179,16 @@ impl TurnGuard {
     /// Sessions remembered before pruning. Far above any real concurrent count;
     /// the bound only stops a long-running widget accumulating tombstones.
     const MAX_SESSIONS: usize = 256;
+    /// Turns remembered per session. A straggler would have to trail its turn by
+    /// more than this many newer turns to slip through — hooks time out in
+    /// seconds, so that isn't a real delivery.
+    const MAX_TURNS: usize = 32;
 
-    /// Record `p` and report whether it should be mapped (`true`) or dropped as
-    /// an out-of-order delivery (`false`).
-    pub fn admit(&mut self, p: &CodexHookPayload) -> bool {
+    /// Record `p` and decide whether it is mapped, mapped-then-corrected, or
+    /// dropped as an out-of-order delivery.
+    pub fn admit(&mut self, p: &CodexHookPayload) -> Verdict {
         let Some(session) = p.session_id.as_deref().filter(|s| !s.is_empty()) else {
-            return true;
+            return Verdict::Admit;
         };
         let turn = p.turn_id.as_deref().filter(|t| !t.is_empty());
         let event = p.hook_event_name.as_str();
@@ -131,7 +201,7 @@ impl TurnGuard {
                 | "Stop"
                 | "SessionEnd"
         ) {
-            return true; // the mapper ignores it; nothing to order
+            return Verdict::Admit; // the mapper ignores it; nothing to order
         }
 
         if !self.sessions.contains_key(session) && self.sessions.len() >= Self::MAX_SESSIONS {
@@ -147,34 +217,77 @@ impl TurnGuard {
         match event {
             "SessionStart" => {
                 *s = SessionTurns::default();
-                true
+                Verdict::Admit
             }
             "UserPromptSubmit" => {
                 s.ended = false;
-                if let Some(t) = turn {
-                    if s.stopped.as_deref() == Some(t) {
-                        s.stopped = None;
+                let Some(t) = turn else {
+                    s.current = None;
+                    return Verdict::Admit;
+                };
+                match s.turn_mut(t) {
+                    None => {
+                        s.remember(t, true, false);
+                        s.current = Some(t.to_string());
+                        Verdict::Admit
                     }
-                    s.current = Some(t.to_string());
+                    // Re-prompt on a known, already-prompted turn: reopen it.
+                    Some(known) if known.prompted => {
+                        known.stopped = false;
+                        s.current = Some(t.to_string());
+                        Verdict::Admit
+                    }
+                    // Late prompt: the turn's tool event or Stop got here first.
+                    Some(known) => {
+                        known.prompted = true;
+                        if s.current_stopped() {
+                            Verdict::AdmitThenAwaiting
+                        } else {
+                            Verdict::Admit
+                        }
+                    }
                 }
-                true
             }
-            _ if s.ended => false,
+            _ if s.ended => Verdict::Drop,
             "SessionEnd" => {
                 s.ended = true;
-                true
+                Verdict::Admit
             }
-            "Stop" => match (turn, s.current.as_deref()) {
-                (Some(t), Some(current)) if t != current => false,
-                (Some(t), _) => {
-                    s.stopped = Some(t.to_string());
-                    true
+            _ => {
+                // Stop | PostToolUse | PermissionRequest — turn-scoped.
+                let Some(t) = turn else {
+                    return Verdict::Admit;
+                };
+                let is_stop = event == "Stop";
+                let Some(known) = s.turn_mut(t) else {
+                    // Unseen turn → newer than all we know; it becomes current.
+                    s.remember(t, false, is_stop);
+                    s.current = Some(t.to_string());
+                    return Verdict::Admit;
+                };
+                let already_stopped = known.stopped;
+                if is_stop {
+                    known.stopped = true; // recorded even when superseded
                 }
-                (None, _) => true,
-            },
-            // PostToolUse | PermissionRequest
-            _ => !(turn.is_some() && turn == s.stopped.as_deref()),
+                let superseded = s.current.as_deref().is_some_and(|c| c != t);
+                if superseded || (already_stopped && !is_stop) {
+                    Verdict::Drop
+                } else {
+                    Verdict::Admit
+                }
+            }
         }
+    }
+}
+
+/// The correction that follows a [`Verdict::AdmitThenAwaiting`] prompt: the same
+/// row, re-asserted as awaiting. Carries no `detail` — the prompt event already
+/// delivered the context snippet, and status events never carry text.
+pub fn awaiting_followup(prompt_event: &WorkEvent) -> WorkEvent {
+    WorkEvent {
+        kind: WorkKind::AwaitingInput,
+        detail: None,
+        ..prompt_event.clone()
     }
 }
 
@@ -269,18 +382,23 @@ mod tests {
         CodexHookPayload { turn_id: Some(turn.into()), ..payload(event) }
     }
 
+    /// Whether the guard lets `p` through (admitted, with or without a follow-up).
+    fn ok(g: &mut TurnGuard, p: &CodexHookPayload) -> bool {
+        g.admit(p) != Verdict::Drop
+    }
+
     #[test]
     fn guard_admits_an_in_order_turn() {
         let mut g = TurnGuard::default();
-        assert!(g.admit(&payload("SessionStart")));
+        assert!(ok(&mut g, &payload("SessionStart")));
         for ev in ["UserPromptSubmit", "PostToolUse", "PermissionRequest", "PostToolUse", "Stop"] {
-            assert!(g.admit(&turn(ev, "t1")), "{ev} in order");
+            assert!(ok(&mut g, &turn(ev, "t1")), "{ev} in order");
         }
         // The next turn starts clean.
         for ev in ["UserPromptSubmit", "PostToolUse", "Stop"] {
-            assert!(g.admit(&turn(ev, "t2")), "{ev} in turn 2");
+            assert!(ok(&mut g, &turn(ev, "t2")), "{ev} in turn 2");
         }
-        assert!(g.admit(&payload("SessionEnd")));
+        assert!(ok(&mut g, &payload("SessionEnd")));
     }
 
     #[test]
@@ -288,48 +406,48 @@ mod tests {
         // The race: Stop set awaiting_input; a late PostToolUse of the same turn
         // must not flip the row back to active.
         let mut g = TurnGuard::default();
-        assert!(g.admit(&turn("UserPromptSubmit", "t1")));
-        assert!(g.admit(&turn("Stop", "t1")));
-        assert!(!g.admit(&turn("PostToolUse", "t1")));
-        assert!(!g.admit(&turn("PermissionRequest", "t1")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &turn("Stop", "t1")));
+        assert!(!ok(&mut g, &turn("PostToolUse", "t1")));
+        assert!(!ok(&mut g, &turn("PermissionRequest", "t1")));
         // …while a mid-turn approval resume (same turn, not stopped) still flows.
-        assert!(g.admit(&turn("UserPromptSubmit", "t2")));
-        assert!(g.admit(&turn("PermissionRequest", "t2")));
-        assert!(g.admit(&turn("PostToolUse", "t2")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t2")));
+        assert!(ok(&mut g, &turn("PermissionRequest", "t2")));
+        assert!(ok(&mut g, &turn("PostToolUse", "t2")));
     }
 
     #[test]
     fn guard_drops_a_stop_superseded_by_the_next_prompt() {
         let mut g = TurnGuard::default();
-        assert!(g.admit(&turn("UserPromptSubmit", "t1")));
-        assert!(g.admit(&turn("UserPromptSubmit", "t2"))); // t1's Stop still in flight
-        assert!(!g.admit(&turn("Stop", "t1")), "late Stop must not mark t2 awaiting");
-        assert!(g.admit(&turn("PostToolUse", "t2")));
-        assert!(g.admit(&turn("Stop", "t2")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t2"))); // t1's Stop still in flight
+        assert!(!ok(&mut g, &turn("Stop", "t1")), "late Stop must not mark t2 awaiting");
+        assert!(ok(&mut g, &turn("PostToolUse", "t2")));
+        assert!(ok(&mut g, &turn("Stop", "t2")));
     }
 
     #[test]
     fn guard_drops_stragglers_after_session_end_until_revived() {
         let mut g = TurnGuard::default();
-        assert!(g.admit(&turn("UserPromptSubmit", "t1")));
-        assert!(g.admit(&payload("SessionEnd")));
-        assert!(!g.admit(&turn("PostToolUse", "t1")));
-        assert!(!g.admit(&turn("Stop", "t1")));
-        assert!(!g.admit(&payload("SessionEnd")), "duplicate end");
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &payload("SessionEnd")));
+        assert!(!ok(&mut g, &turn("PostToolUse", "t1")));
+        assert!(!ok(&mut g, &turn("Stop", "t1")));
+        assert!(!ok(&mut g, &payload("SessionEnd")), "duplicate end");
         // A resumed session comes back on a prompt (or a SessionStart).
-        assert!(g.admit(&turn("UserPromptSubmit", "t2")));
-        assert!(g.admit(&turn("PostToolUse", "t2")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t2")));
+        assert!(ok(&mut g, &turn("PostToolUse", "t2")));
     }
 
     #[test]
     fn guard_never_drops_a_prompt_and_self_heals_on_a_reused_turn_id() {
         let mut g = TurnGuard::default();
-        assert!(g.admit(&turn("UserPromptSubmit", "t1")));
-        assert!(g.admit(&turn("Stop", "t1")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &turn("Stop", "t1")));
         // Same turn id again: the prompt is admitted and reopens the turn.
-        assert!(g.admit(&turn("UserPromptSubmit", "t1")));
-        assert!(g.admit(&turn("PostToolUse", "t1")));
-        assert!(g.admit(&turn("Stop", "t1")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &turn("PostToolUse", "t1")));
+        assert!(ok(&mut g, &turn("Stop", "t1")));
     }
 
     #[test]
@@ -337,19 +455,96 @@ mod tests {
         let mut g = TurnGuard::default();
         // No turn ids at all → nothing to compare, everything flows.
         for ev in ["UserPromptSubmit", "Stop", "PostToolUse", "Stop"] {
-            assert!(g.admit(&payload(ev)), "{ev} without turn_id");
+            assert!(ok(&mut g, &payload(ev)), "{ev} without turn_id");
         }
         // No session id → never tracked.
         let mut anon = turn("PostToolUse", "t1");
         anon.session_id = None;
-        assert!(g.admit(&anon));
+        assert!(ok(&mut g, &anon));
         // One session's stop doesn't gate another's same-named turn.
-        assert!(g.admit(&turn("Stop", "t9")));
+        assert!(ok(&mut g, &turn("Stop", "t9")));
         let mut other = turn("PostToolUse", "t9");
         other.session_id = Some("thr_other".into());
-        assert!(g.admit(&other));
+        assert!(ok(&mut g, &other));
         // Events the mapper ignores pass through untracked.
-        assert!(g.admit(&turn("PreToolUse", "t9")));
+        assert!(ok(&mut g, &turn("PreToolUse", "t9")));
+    }
+
+    #[test]
+    fn guard_keeps_a_finished_turn_awaiting_when_its_prompt_arrives_late() {
+        // A very short turn: Stop(t1) beats the backgrounded UserPromptSubmit(t1).
+        let mut g = TurnGuard::default();
+        assert_eq!(g.admit(&turn("Stop", "t1")), Verdict::Admit);
+        // The prompt still maps (attribution + context) but must be followed by
+        // an awaiting re-assert, and the turn stays closed to stragglers.
+        assert_eq!(g.admit(&turn("UserPromptSubmit", "t1")), Verdict::AdmitThenAwaiting);
+        assert_eq!(g.admit(&turn("PostToolUse", "t1")), Verdict::Drop);
+        // Same when a tool event was the first sign of the turn.
+        assert_eq!(g.admit(&turn("PostToolUse", "t2")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("Stop", "t2")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("UserPromptSubmit", "t2")), Verdict::AdmitThenAwaiting);
+        // A late prompt for a turn still running needs no correction.
+        assert_eq!(g.admit(&turn("PostToolUse", "t3")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("UserPromptSubmit", "t3")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("Stop", "t3")), Verdict::Admit);
+    }
+
+    #[test]
+    fn guard_admits_a_stop_that_beats_its_prompt_past_an_older_turn() {
+        // Stop(t2) arrives while t1 is still the newest *prompted* turn: t2 is
+        // unseen, hence newer — not "superseded".
+        let mut g = TurnGuard::default();
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &turn("Stop", "t1")));
+        assert_eq!(g.admit(&turn("Stop", "t2")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("UserPromptSubmit", "t2")), Verdict::AdmitThenAwaiting);
+    }
+
+    #[test]
+    fn guard_prompt_without_turn_id_clears_the_stale_current_turn() {
+        let mut g = TurnGuard::default();
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &turn("Stop", "t1")));
+        assert!(ok(&mut g, &payload("UserPromptSubmit"))); // no turn_id
+        assert!(ok(&mut g, &turn("PostToolUse", "t2")));
+        assert!(ok(&mut g, &turn("Stop", "t2")), "must not read as superseded by t1");
+    }
+
+    #[test]
+    fn guard_remembers_stopped_and_superseded_turns_across_turns() {
+        let mut g = TurnGuard::default();
+        for t in ["t1", "t2"] {
+            assert!(ok(&mut g, &turn("UserPromptSubmit", t)));
+            assert!(ok(&mut g, &turn("Stop", t)));
+        }
+        // t1 stopped two turns ago — its straggler is still recognised.
+        assert_eq!(g.admit(&turn("PostToolUse", "t1")), Verdict::Drop);
+        assert_eq!(g.admit(&turn("PermissionRequest", "t1")), Verdict::Drop);
+
+        // A superseded turn (t3, never saw its Stop in time) is closed too…
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t3")));
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t4")));
+        assert_eq!(g.admit(&turn("PermissionRequest", "t3")), Verdict::Drop);
+        assert_eq!(g.admit(&turn("Stop", "t3")), Verdict::Drop);
+        assert_eq!(g.admit(&turn("PostToolUse", "t3")), Verdict::Drop);
+        // …without disturbing the turn that is actually running.
+        assert_eq!(g.admit(&turn("PostToolUse", "t4")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("Stop", "t4")), Verdict::Admit);
+    }
+
+    #[test]
+    fn awaiting_followup_is_the_same_row_without_text() {
+        let mut p = turn("UserPromptSubmit", "t1");
+        p.prompt = Some("ship it".into());
+        let prompt = codex_hook_to_event(&p, &HashMap::new(), NOW, true).unwrap();
+        assert_eq!(prompt.detail.as_deref(), Some("ship it"));
+        let follow = awaiting_followup(&prompt);
+        assert_eq!(follow.kind, WorkKind::AwaitingInput);
+        assert_eq!(follow.detail, None);
+        assert_eq!(
+            (follow.surface, &follow.project, &follow.source, &follow.ts),
+            (prompt.surface, &prompt.project, &prompt.source, &prompt.ts)
+        );
     }
 
     #[test]
@@ -358,9 +553,14 @@ mod tests {
         for i in 0..(TurnGuard::MAX_SESSIONS * 3) {
             let mut p = turn("UserPromptSubmit", "t1");
             p.session_id = Some(format!("thr_{i}"));
-            assert!(g.admit(&p));
+            assert!(ok(&mut g, &p));
             assert!(g.sessions.len() <= TurnGuard::MAX_SESSIONS);
         }
+        // …and so is each session's turn history.
+        for i in 0..(TurnGuard::MAX_TURNS * 3) {
+            assert!(ok(&mut g, &turn("UserPromptSubmit", &format!("t{i}"))));
+        }
+        assert!(g.sessions["thr_123"].turns.len() <= TurnGuard::MAX_TURNS);
     }
 
     fn map(p: &CodexHookPayload) -> Option<WorkEvent> {

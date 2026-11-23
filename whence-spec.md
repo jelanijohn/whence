@@ -338,19 +338,27 @@ and `prompt` — tool input, tool output and the assistant's reply are never des
 `context_hook_prompts` gate, as the same display-only `HookPrompt` moment (§9).
 
 **Out-of-order delivery.** Every installed hook is a backgrounded `curl`, so
-arrival order is not event order. `codex::TurnGuard` (pure, fixture-tested,
-owned by the receiver thread) drops stale deliveries before they are mapped,
-keyed on `session_id` + `turn_id`: a `PostToolUse` / `PermissionRequest` for a
-turn that already stopped (it would flip an *awaiting* row back to active with
-nothing left to correct it); a `Stop` for a turn the next prompt has already
-superseded (it would mark a working row *awaiting*); and anything after
-`SessionEnd` (it would re-create the dropped row). A prompt or `SessionStart`
-is never dropped. This lives in the adapter rather than `segment.rs` because
-the engine's Claude Code guard ("generic activity never overrides awaiting")
-can't be reused: the legitimate `PermissionRequest` → approve → `PostToolUse`
-resume happens within one turn, and only `turn_id` — adapter-native, never on
-a `WorkEvent` — tells it from a straggler. Payloads missing the ids are
-admitted unchanged, so the guard degrades to unguarded, never to lost signal.
+arrival order is not event order — for the prompt as much as for tool events.
+`codex::TurnGuard` (pure, fixture-tested, owned by the receiver thread) orders
+deliveries before they are mapped. Per `session_id` it keeps a bounded history
+of recent turns (prompt seen? stopped?) and the *current* turn; a `turn_id`
+never seen before is newer than everything known, whichever of its events
+lands first. It drops a `PostToolUse` / `PermissionRequest` whose turn has
+stopped or been superseded (it would flip an *awaiting* row back to active
+with nothing left to correct it), a `Stop` for a superseded turn (it would
+mark a working row *awaiting* — the stop is still recorded, so that turn's
+stragglers stay recognisable), and anything after `SessionEnd` (it would
+re-create the dropped row). A prompt or `SessionStart` is never dropped: a
+prompt that lands *after* its turn already stopped is still mapped, for its
+you-acted attribution and context snippet, and the receiver follows it with an
+`awaiting_input` re-assert so the finished row doesn't read "working". This
+lives in the adapter rather than `segment.rs` because the engine's Claude Code
+guard ("generic activity never overrides awaiting") can't be reused: the
+legitimate `PermissionRequest` → approve → `PostToolUse` resume happens within
+one turn, and only `turn_id` — adapter-native, never on a `WorkEvent` — tells
+it from a straggler. Payloads missing the ids are admitted unchanged (a prompt
+without a `turn_id` also clears the current turn), so the guard degrades to
+unguarded, never to lost signal.
 
 **Opt-in, twice.** `codex_enabled` (default off, read per request — no restart)
 gates the route: off means `/codex` payloads are accepted and dropped
