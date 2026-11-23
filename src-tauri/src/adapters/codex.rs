@@ -77,6 +77,10 @@ struct SessionTurns {
     current: Option<String>,
     /// Recent turns, oldest first, bounded by [`TurnGuard::MAX_TURNS`].
     turns: std::collections::VecDeque<Turn>,
+    /// The row's last admitted status was *awaiting* (a `Stop` or a
+    /// `PermissionRequest`), with no prompt or tool event since. A late prompt or
+    /// `SessionStart` must not paint over it.
+    awaiting: bool,
     /// `SessionEnd` seen; only a new prompt or `SessionStart` revives the session.
     ended: bool,
 }
@@ -94,12 +98,14 @@ impl SessionTurns {
         self.turns.push_back(Turn { id: id.to_string(), prompted, stopped });
     }
 
-    /// Whether the current turn has already stopped (the row should read awaiting).
-    fn current_stopped(&self) -> bool {
-        self.current
-            .as_deref()
-            .and_then(|c| self.turns.iter().find(|t| t.id == c))
-            .is_some_and(|t| t.stopped)
+    /// The verdict for a you-acted event that arrived late: mapped, and corrected
+    /// back to awaiting when that is what the row last (rightly) showed.
+    fn late(&self) -> Verdict {
+        if self.awaiting {
+            Verdict::AdmitThenAwaiting
+        } else {
+            Verdict::Admit
+        }
     }
 }
 
@@ -108,10 +114,11 @@ impl SessionTurns {
 pub enum Verdict {
     /// In order — map it.
     Admit,
-    /// A prompt that arrived *after* its turn (or a newer one) already stopped.
-    /// Still mapped — it carries the you-acted attribution and the context
-    /// snippet — but the receiver must follow it with an `AwaitingInput` so the
-    /// finished row doesn't read "working" (see [`awaiting_followup`]).
+    /// A prompt or `SessionStart` that arrived *after* the session had already
+    /// gone awaiting (its turn stopped, or is blocked on an approval). Still
+    /// mapped — it carries the you-acted attribution and the context snippet —
+    /// but the receiver must follow it with an `AwaitingInput` so the row doesn't
+    /// read "working" (see [`awaiting_followup`]).
     AdmitThenAwaiting,
     /// Out-of-order delivery — drop it.
     Drop,
@@ -126,8 +133,8 @@ pub enum Verdict {
 /// * a late `PostToolUse` landing after its turn's `Stop` flips the row back to
 ///   *active* with nothing left to correct it (the turn is over, no further
 ///   event comes) — it reads "working" until the idle timeout;
-/// * a late `UserPromptSubmit` landing after its own turn's `Stop` (a very
-///   short turn) does the same;
+/// * a late `UserPromptSubmit` or `SessionStart` landing after the turn's
+///   `Stop` (a very short turn) or its `PermissionRequest` does the same;
 /// * a late `Stop` landing after the *next* prompt marks a working row
 ///   *awaiting you*;
 /// * anything landing after `SessionEnd` re-creates the row the end just dropped.
@@ -147,10 +154,13 @@ pub enum Verdict {
 /// * `UserPromptSubmit` / `SessionStart` are **never dropped** — they are the
 ///   you-acted signals.
 ///   * first sight of the turn → it becomes current;
-///   * the turn is already known but its prompt wasn't (a tool event or `Stop`
-///     beat it here) → a *late* prompt: mapped, and if the current turn has
-///     already stopped, followed by an awaiting re-assert
+///   * the turn is already known but its prompt wasn't (a tool event,
+///     `PermissionRequest` or `Stop` beat it here) → a *late* prompt: mapped,
+///     and if the row is awaiting, followed by an awaiting re-assert
 ///     ([`Verdict::AdmitThenAwaiting`]);
+///   * a `SessionStart` for a session that is already live (a late delivery, or
+///     a resume — indistinguishable, and treated alike) keeps the turn history
+///     and gets the same awaiting re-assert; only one after `SessionEnd` resets;
 ///   * the turn's prompt was already seen → a re-prompt on a reused `turn_id`:
 ///     the turn reopens and becomes current, so the guard self-heals should a
 ///     runtime ever reuse ids;
@@ -216,35 +226,36 @@ impl TurnGuard {
 
         match event {
             "SessionStart" => {
-                *s = SessionTurns::default();
-                Verdict::Admit
+                if s.ended {
+                    *s = SessionTurns::default();
+                }
+                s.late()
             }
             "UserPromptSubmit" => {
                 s.ended = false;
                 let Some(t) = turn else {
                     s.current = None;
+                    s.awaiting = false;
                     return Verdict::Admit;
                 };
                 match s.turn_mut(t) {
                     None => {
                         s.remember(t, true, false);
                         s.current = Some(t.to_string());
+                        s.awaiting = false;
                         Verdict::Admit
                     }
                     // Re-prompt on a known, already-prompted turn: reopen it.
                     Some(known) if known.prompted => {
                         known.stopped = false;
                         s.current = Some(t.to_string());
+                        s.awaiting = false;
                         Verdict::Admit
                     }
-                    // Late prompt: the turn's tool event or Stop got here first.
+                    // Late prompt: one of the turn's own events got here first.
                     Some(known) => {
                         known.prompted = true;
-                        if s.current_stopped() {
-                            Verdict::AdmitThenAwaiting
-                        } else {
-                            Verdict::Admit
-                        }
+                        s.late()
                     }
                 }
             }
@@ -255,26 +266,33 @@ impl TurnGuard {
             }
             _ => {
                 // Stop | PostToolUse | PermissionRequest — turn-scoped.
-                let Some(t) = turn else {
-                    return Verdict::Admit;
-                };
                 let is_stop = event == "Stop";
-                let Some(known) = s.turn_mut(t) else {
-                    // Unseen turn → newer than all we know; it becomes current.
-                    s.remember(t, false, is_stop);
-                    s.current = Some(t.to_string());
-                    return Verdict::Admit;
+                let stale = match turn {
+                    None => false, // nothing to compare
+                    Some(t) => match s.turn_mut(t) {
+                        // Unseen turn → newer than all we know; it becomes current.
+                        None => {
+                            s.remember(t, false, is_stop);
+                            s.current = Some(t.to_string());
+                            false
+                        }
+                        Some(known) => {
+                            let already_stopped = known.stopped;
+                            if is_stop {
+                                known.stopped = true; // recorded even when superseded
+                            }
+                            let superseded = s.current.as_deref().is_some_and(|c| c != t);
+                            superseded || (already_stopped && !is_stop)
+                        }
+                    },
                 };
-                let already_stopped = known.stopped;
-                if is_stop {
-                    known.stopped = true; // recorded even when superseded
+                if stale {
+                    return Verdict::Drop;
                 }
-                let superseded = s.current.as_deref().is_some_and(|c| c != t);
-                if superseded || (already_stopped && !is_stop) {
-                    Verdict::Drop
-                } else {
-                    Verdict::Admit
-                }
+                // What the row now shows: awaiting after a Stop or an approval
+                // request, working again after a tool ran.
+                s.awaiting = event != "PostToolUse";
+                Verdict::Admit
             }
         }
     }
@@ -487,6 +505,34 @@ mod tests {
         assert_eq!(g.admit(&turn("PostToolUse", "t3")), Verdict::Admit);
         assert_eq!(g.admit(&turn("UserPromptSubmit", "t3")), Verdict::Admit);
         assert_eq!(g.admit(&turn("Stop", "t3")), Verdict::Admit);
+    }
+
+    #[test]
+    fn guard_keeps_a_finished_session_awaiting_when_its_start_arrives_late() {
+        // SessionStart is backgrounded too: it can land after the first turn.
+        let mut g = TurnGuard::default();
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t1")));
+        assert!(ok(&mut g, &turn("Stop", "t1")));
+        assert_eq!(g.admit(&payload("SessionStart")), Verdict::AdmitThenAwaiting);
+        // …and it must not have erased the turn history.
+        assert_eq!(g.admit(&turn("PostToolUse", "t1")), Verdict::Drop);
+        // Mid-turn (row working) it needs no correction; after an end it resets.
+        assert!(ok(&mut g, &turn("UserPromptSubmit", "t2")));
+        assert_eq!(g.admit(&payload("SessionStart")), Verdict::Admit);
+        assert!(ok(&mut g, &payload("SessionEnd")));
+        assert_eq!(g.admit(&payload("SessionStart")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("PostToolUse", "t1")), Verdict::Admit, "fresh history");
+    }
+
+    #[test]
+    fn guard_keeps_an_approval_wait_awaiting_when_the_prompt_arrives_late() {
+        let mut g = TurnGuard::default();
+        // PermissionRequest(t1) beats UserPromptSubmit(t1): still blocked on you.
+        assert_eq!(g.admit(&turn("PermissionRequest", "t1")), Verdict::Admit);
+        assert_eq!(g.admit(&turn("UserPromptSubmit", "t1")), Verdict::AdmitThenAwaiting);
+        // Once the approved tool has run, the row is working again.
+        assert_eq!(g.admit(&turn("PostToolUse", "t1")), Verdict::Admit);
+        assert_eq!(g.admit(&payload("SessionStart")), Verdict::Admit);
     }
 
     #[test]

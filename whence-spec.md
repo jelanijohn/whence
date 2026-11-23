@@ -348,10 +348,13 @@ stopped or been superseded (it would flip an *awaiting* row back to active
 with nothing left to correct it), a `Stop` for a superseded turn (it would
 mark a working row *awaiting* — the stop is still recorded, so that turn's
 stragglers stay recognisable), and anything after `SessionEnd` (it would
-re-create the dropped row). A prompt or `SessionStart` is never dropped: a
-prompt that lands *after* its turn already stopped is still mapped, for its
-you-acted attribution and context snippet, and the receiver follows it with an
-`awaiting_input` re-assert so the finished row doesn't read "working". This
+re-create the dropped row). A prompt or `SessionStart` is never dropped: one
+that lands *after* the session already went awaiting (its turn stopped, or is
+blocked on an approval) is still mapped, for its you-acted attribution and
+context snippet, and the receiver follows it with an `awaiting_input`
+re-assert so the row doesn't read "working". A `SessionStart` for a session
+that is already live keeps the turn history; only one after `SessionEnd`
+resets it. This
 lives in the adapter rather than `segment.rs` because the engine's Claude Code
 guard ("generic activity never overrides awaiting") can't be reused: the
 legitimate `PermissionRequest` → approve → `PostToolUse` resume happens within
@@ -379,6 +382,12 @@ URL so any token generation is pruned. The entry is `async: true` with a 2 s
   one `codex` surface.
 * Cloud-orchestrated sessions (even with local computer access) and ordinary
   ChatGPT chats run no local hooks and are not seen.
+* The out-of-order guard infers order from arrival: Codex's payloads carry no
+  timestamp or sequence number, and `PermissionRequest` has no tool-call id.
+  Two orderings therefore can't be told apart from their in-order twins: an
+  older turn none of whose events had arrived, surfacing after a newer turn's
+  prompt; and a `PermissionRequest` landing after the `PostToolUse` of the
+  tool it asked about (the row reads *awaiting* until the turn's next event).
 * The out-of-order guard needs `turn_id` on the payload; an event without one
   is admitted as-is, so on such a payload a late `PostToolUse` after `Stop`
   could still flip a row back to active until the idle timeout.
