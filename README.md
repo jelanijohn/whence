@@ -79,6 +79,7 @@ changes. Details for each in spec §5.
 |---|---|---|---|
 | Claude Code transcripts | `~/.claude/projects/**/*.jsonl` watch | attribution (primary) | on, zero-config |
 | Claude Code hooks | native `http` hooks → `127.0.0.1:18450` | live `awaiting_input` status | opt-in install |
+| Codex / ChatGPT Work (local) | `command` hooks → `127.0.0.1:18450/codex` | originating attribution + live status | opt-in |
 | Browser LLM | MV3 extension (`extension/`) → `127.0.0.1:18452` | originating attribution — claude.ai chat + Design, chatgpt.com | opt-in |
 | Terminal cwd | shell hook POST → `127.0.0.1:18451` | weak corroborator | opt-in |
 | Ollama | `/api/ps` poll | unattributed liveness status | opt-in |
@@ -91,6 +92,10 @@ Worth knowing:
 - Hook install/uninstall is a Settings button doing a merge-preserving
   round-trip of `.claude/settings.json`; the receiver token rides in the hook
   URL, and rotation rewrites installed hooks.
+- Codex hooks install the same way into `.codex/hooks.json` (a `curl` pipe —
+  Codex has no `http` hook type), but Codex skips new or changed hooks until
+  you approve them in its own hook review, again after a token rotation
+  (spec §5.7).
 - The extension reads only project-scoped URLs and the provider's project
   id/name — never chat content or tab focus. The provider→slug map is
   hand-editable TOML. Browser source rows are clickable: raise the tab and pin
@@ -196,9 +201,11 @@ run twice and double-write labels), `window-state` (position memory), and
 - **Root chats aren't attributed.** The browser adapter only attributes chats
   filed under a provider project; a root-level chat resolves to no project and
   is dropped as ambient. Attributing these is planned (spec §5.5).
-- **Claude Desktop isn't tracked.** The desktop app's chat tab has no clean
-  local artifact or hook to read — the available capture methods are too
-  fragile to ship right now, so the surface stays deferred (spec §5.4).
+- **Desktop apps are tracked only where they run local hooks.** Claude
+  Desktop's *Code* tab shares `~/.claude` with the CLI, so it shows up as
+  `claude code`; ChatGPT's *Work → Local* mode shows up as `codex`. Neither
+  runtime says which client owns a session. Chat tabs, cloud sessions, and
+  Cowork aren't tracked (spec §5.4, §5.7).
 
 ## Status & scope
 
@@ -206,13 +213,13 @@ v0–v1.5 shipped: transcript watcher, segmentation engine (trust tiers,
 present/running, state registry), roster widget with settings window and
 appearance controls, JSONL timeline, NeuroSkill labels + health dot, hooks
 receiver, Ollama liveness, terminal corroborator, browser extension, receiver
-auth, context strings, EEG intensity meter.
+auth, context strings, EEG intensity meter, Codex / ChatGPT Work hooks.
 
 Planned, in order:
 
 - **Wider surface coverage** — provider-table expansion (a ChatGPT `/codex`
   prefix), a Jupyter kernel adapter, a Warp Agent adapter, IDE adapters
-  (Cursor, Codex, IntelliJ, VS Code), a blind-spot counter.
+  (Cursor, IntelliJ, VS Code), a blind-spot counter.
 - **WAID timeline ingestion** — the Whence-side contract ships in
   [`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md); the
   intention-vs-reality view is WAID-repo work.

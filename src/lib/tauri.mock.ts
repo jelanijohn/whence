@@ -158,6 +158,7 @@ const settings: Settings = {
   claudeDir: null,
   projectAliases: {},
   hookListenAddrOverride: null,
+  codexEnabled: false,
   ollamaEnabled: false,
   ollamaEndpoint: null,
   terminalEnabled: false,
@@ -221,9 +222,12 @@ function respond(cmd: string, args?: Record<string, unknown>): unknown {
       // Null = extension hasn't reported this launch; the diagnostic line hides.
       return null;
     case "focus_source":
+    case "dismiss_source":
     case "open_settings":
     case "install_claude_hooks":
     case "uninstall_claude_hooks":
+    case "install_codex_hooks":
+    case "uninstall_codex_hooks":
       return undefined;
     default:
       // A command the mock doesn't know = a contract drift; fail loudly rather

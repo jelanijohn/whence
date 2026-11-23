@@ -65,6 +65,14 @@ pub struct Settings {
     /// the token rides in the installed hook URL.
     #[serde(default)]
     pub hook_listen_addr_override: Option<String>,
+    /// Accept hook events from **Codex / ChatGPT Work local sessions** on the hooks
+    /// receiver's `/codex` route (`adapters/codex.rs`). **Opt-in, default off:** it
+    /// needs the Codex hooks installed (Settings button → `$CODEX_HOME/hooks.json`)
+    /// *and* approved in Codex's own hook review, so the flag alone does nothing.
+    /// Read per request — toggling applies without a restart; off = `/codex`
+    /// payloads are accepted and dropped unparsed.
+    #[serde(default)]
+    pub codex_enabled: bool,
     /// Poll Ollama's local API for inference **liveness** (a low-confidence status
     /// signal only — never originates a focus switch; §5.2 / §14.5). **Opt-in,
     /// default off:** Ollama activity is *unattributed* (it knows inference is
@@ -209,6 +217,7 @@ impl Default for Settings {
             claude_dir: None,
             project_aliases: HashMap::new(),
             hook_listen_addr_override: None,
+            codex_enabled: false,
             ollama_enabled: false,
             ollama_endpoint: None,
             terminal_enabled: false,

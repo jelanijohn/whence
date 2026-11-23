@@ -31,7 +31,10 @@ adapters/  →  engine/segment.rs  →  outputs (widget · NeuroSkill labels · 
   surface's native signal into a normalized `WorkEvent` and sends it on the core
   channel. All are implemented: `claude_code.rs` (transcript watch) and
   `hooks.rs` (the Claude Code hook receiver, a `tiny_http` listener on
-  `127.0.0.1:18450` for live `awaiting_input` status) run by default; `ollama.rs`
+  `127.0.0.1:18450` for live `awaiting_input` status) run by default; `codex.rs`
+  (Codex / ChatGPT Work local sessions — a pure mapper behind the hooks
+  receiver's `/codex` route, fed by `command` hooks that `curl` their payload in;
+  opt-in via `codex_enabled`, default OFF, read per request; spec §5.7); `ollama.rs`
   (`/api/ps` liveness) and `terminal.rs` (cwd corroborator on `127.0.0.1:18451`)
   are opt-in, default OFF (`ollama_enabled` / `terminal_enabled`), and only
   spawned when enabled. Adding a surface = adding an adapter; nothing else changes.

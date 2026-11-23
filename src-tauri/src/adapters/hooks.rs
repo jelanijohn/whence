@@ -30,7 +30,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{
-    claude_code, collapse_worktree_cwd, slug_from_transcript_dir, Surface, WorkEvent, WorkKind,
+    claude_code, codex, collapse_worktree_cwd, slug_from_transcript_dir, Surface, WorkEvent, WorkKind,
 };
 
 /// The subset of a Claude Code hook payload we read. Claude Code adds fields over
@@ -156,7 +156,7 @@ pub fn hook_to_event(
 /// with an angle-bracket tag. The user-authored posture (docs/context-strings.md
 /// §10) prefers a false drop (a pasted `<div>` snippet degrades to the git
 /// fallback) over displaying machine text.
-fn is_synthetic_prompt(prompt: &str) -> bool {
+pub(crate) fn is_synthetic_prompt(prompt: &str) -> bool {
     prompt
         .trim_start()
         .strip_prefix('<')
@@ -254,6 +254,29 @@ fn basename(cwd: &str) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
+/// Which adapter a request on the hooks receiver belongs to. One socket serves
+/// both hook dialects; the **first path segment** picks the mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// Claude Code `http` hooks — `/hook/<token>` and, historically, anything
+    /// else: the receiver never checked its path, so every non-`/codex` path
+    /// stays Claude to keep already-installed hook URLs working.
+    Claude,
+    /// Codex `command` hooks — `/codex` (token in the `Authorization` header; a
+    /// `/codex/<token>` path carrier works too, since auth reads the last segment).
+    Codex,
+}
+
+/// Pick the [`Route`] for a request path (query/fragment ignored). Pure —
+/// fixture-tested.
+pub fn route(url_path: &str) -> Route {
+    let path = url_path.split(['?', '#']).next().unwrap_or("");
+    match path.split('/').find(|seg| !seg.is_empty()) {
+        Some("codex") => Route::Codex,
+        _ => Route::Claude,
+    }
+}
+
 /// Bind the loopback hook endpoint and serve forever on a dedicated thread,
 /// emitting `WorkEvent`s on `tx`. Returns the **bound address** once the socket is
 /// up (so a `:0` bind reports its ephemeral port — how the e2e test avoids a fixed
@@ -273,6 +296,10 @@ fn basename(cwd: &str) -> Option<String> {
 /// starts/stops prompt-snippet retention without a restart. `moments` is where a
 /// captured snippet/summary is recorded as its project's live context moment
 /// (receivers record; the orchestrator arbitrates and clears — context.rs).
+///
+/// `/codex` requests ([`route`]) are Codex `command`-hook payloads, mapped by
+/// `codex::codex_hook_to_event` and gated by the live `codex_enabled` setting —
+/// off means accepted and dropped unparsed.
 ///
 /// Every authorized request gets a `200` with an empty body — Claude Code ignores
 /// the response, and the receiver's only contract is "accept fast, never block".
@@ -297,6 +324,9 @@ pub fn serve(
     std::thread::Builder::new()
         .name("whence-hooks".into())
         .spawn(move || {
+            // Out-of-order guard for Codex's backgrounded hooks. Owned by this
+            // thread: requests are handled one at a time, so no lock.
+            let mut codex_turns = codex::TurnGuard::default();
             for mut req in server.incoming_requests() {
                 // Auth inside a scope: the read guard (poison-recovering, no clone)
                 // drops before the body read, so a rotation never waits on a slow
@@ -311,36 +341,69 @@ pub fn serve(
                 }
                 let mut body = String::new();
                 // Read the POST body; on a read error just respond and move on.
+                let which = route(req.url());
                 if req.as_reader().read_to_string(&mut body).is_ok() {
-                    if let Ok(payload) = serde_json::from_str::<HookPayload>(&body) {
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let capture = settings
-                            .lock()
-                            .map(|s| s.context_strings && s.context_hook_prompts)
-                            .unwrap_or(false);
-                        if let Some(ev) = hook_to_event(
-                            &payload,
-                            &aliases,
-                            transcripts_root.as_deref(),
-                            &now,
-                            capture,
-                        ) {
-                            // A captured snippet/summary (detail is only set when the
-                            // gate was on) becomes the project's live context moment.
-                            if let (Some(project), Some(text), Some(ts)) =
-                                (&ev.project, &ev.detail, ev.ts_secs())
-                            {
-                                crate::context::record_moment(
-                                    &moments,
-                                    project,
-                                    text,
-                                    crate::context::ContextSource::HookPrompt,
-                                    ts,
-                                );
-                            }
-                            // Unbounded send never blocks; an error only means the
-                            // core task is gone (shutdown), so dropping is correct.
-                            let _ = tx.send(ev);
+                    let now = chrono::Utc::now().to_rfc3339();
+                    // Both gates read live, in one lock: the hook-prompt context
+                    // gate and the Codex surface opt-in.
+                    let (capture, codex_enabled) = settings
+                        .lock()
+                        .map(|s| (s.context_strings && s.context_hook_prompts, s.codex_enabled))
+                        .unwrap_or((false, false));
+                    // Set when the Codex ordering guard admits a late prompt on
+                    // an already-finished turn: the prompt is sent, then an
+                    // awaiting re-assert (codex::Verdict::AdmitThenAwaiting).
+                    let mut then_awaiting = false;
+                    let event = match which {
+                        Route::Claude => serde_json::from_str::<HookPayload>(&body)
+                            .ok()
+                            .and_then(|payload| {
+                                hook_to_event(
+                                    &payload,
+                                    &aliases,
+                                    transcripts_root.as_deref(),
+                                    &now,
+                                    capture,
+                                )
+                            }),
+                        // Surface off → dropped before the body is even parsed.
+                        Route::Codex if !codex_enabled => None,
+                        Route::Codex => serde_json::from_str::<codex::CodexHookPayload>(&body)
+                            .ok()
+                            // A stale delivery (late tool use after `Stop`, …)
+                            // is dropped here, before it can touch a row.
+                            .filter(|payload| match codex_turns.admit(payload) {
+                                codex::Verdict::Admit => true,
+                                codex::Verdict::AdmitThenAwaiting => {
+                                    then_awaiting = true;
+                                    true
+                                }
+                                codex::Verdict::Drop => false,
+                            })
+                            .and_then(|payload| {
+                                codex::codex_hook_to_event(&payload, &aliases, &now, capture)
+                            }),
+                    };
+                    if let Some(ev) = event {
+                        // A captured snippet/summary (detail is only set when the
+                        // gate was on) becomes the project's live context moment.
+                        if let (Some(project), Some(text), Some(ts)) =
+                            (&ev.project, &ev.detail, ev.ts_secs())
+                        {
+                            crate::context::record_moment(
+                                &moments,
+                                project,
+                                text,
+                                crate::context::ContextSource::HookPrompt,
+                                ts,
+                            );
+                        }
+                        // Unbounded send never blocks; an error only means the
+                        // core task is gone (shutdown), so dropping is correct.
+                        let followup = then_awaiting.then(|| codex::awaiting_followup(&ev));
+                        let _ = tx.send(ev);
+                        if let Some(awaiting) = followup {
+                            let _ = tx.send(awaiting);
                         }
                     }
                 }
@@ -720,5 +783,133 @@ mod tests {
         let moment = crate::context::moment_for(&moments, "whence").expect("gate on → moment");
         assert_eq!(moment.text, "fix the parser");
         assert_eq!(moment.source, crate::context::ContextSource::HookPrompt);
+    }
+
+    #[test]
+    fn route_picks_the_adapter_by_first_segment() {
+        assert_eq!(route("/codex"), Route::Codex);
+        assert_eq!(route("/codex/"), Route::Codex);
+        assert_eq!(route("/codex/sometoken"), Route::Codex);
+        assert_eq!(route("/codex?x=1"), Route::Codex);
+        // Everything else is Claude — including the installed `/hook/<token>` URL,
+        // a bare root, and lookalikes that merely contain or start with "codex".
+        assert_eq!(route("/hook/sometoken"), Route::Claude);
+        assert_eq!(route("/hook"), Route::Claude);
+        assert_eq!(route("/"), Route::Claude);
+        assert_eq!(route(""), Route::Claude);
+        assert_eq!(route("/hook/codex"), Route::Claude);
+        assert_eq!(route("/codexx"), Route::Claude);
+    }
+
+    #[test]
+    fn serve_routes_codex_hooks_behind_the_opt_in() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, RwLock};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let token: crate::auth::SharedToken = Arc::new(RwLock::new("testtok".to_string()));
+        let denials: crate::auth::Denials = Arc::new(AtomicU64::new(0));
+        let settings = Arc::new(std::sync::Mutex::new(crate::settings::Settings::default()));
+        let moments = crate::context::new_moments();
+        let bound = serve(
+            tx,
+            no_aliases(),
+            "127.0.0.1:0",
+            None,
+            token,
+            denials.clone(),
+            settings.clone(),
+            moments.clone(),
+        )
+        .unwrap();
+        let addr = &bound.to_string();
+
+        // What the installed `curl` command sends: the stdin payload, token in the
+        // Authorization header, `/codex` path.
+        let body = r#"{"hook_event_name":"UserPromptSubmit","session_id":"thr_1","cwd":"/w/whence","prompt":"ship it","tool_response":"x"}"#;
+        let post = |auth: &str| {
+            format!(
+                "POST /codex HTTP/1.1\r\nHost: whence\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        const AUTH: &str = "Authorization: Bearer testtok\r\n";
+
+        // The route is bearer-gated like every other request on this socket.
+        let resp = raw_http(addr, &post(""));
+        assert!(resp.starts_with("HTTP/1.1 401"), "expected 401, got: {resp}");
+        assert_eq!(denials.load(Ordering::Relaxed), 1);
+
+        // Surface off (the default) → accepted, dropped. Never mis-parsed as a
+        // Claude Code payload either (it would otherwise be a claude-code Prompt).
+        let resp = raw_http(addr, &post(AUTH));
+        assert!(resp.starts_with("HTTP/1.1 200"), "expected 200, got: {resp}");
+        assert!(rx.try_recv().is_err(), "codex disabled → no event");
+
+        // Opt in — applies live, no restart.
+        settings.lock().unwrap().codex_enabled = true;
+        let resp = raw_http(addr, &post(AUTH));
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        let ev = rx.try_recv().expect("codex enabled → event flows");
+        assert_eq!(ev.surface, Surface::Codex);
+        assert_eq!(ev.kind, WorkKind::Prompt);
+        assert_eq!(ev.project.as_deref(), Some("whence"));
+        assert_eq!(ev.source.as_deref(), Some("thr_1"));
+        assert_eq!(ev.detail, None, "prompt gate off → no prompt text retained");
+        assert!(crate::context::moment_for(&moments, "whence").is_none());
+
+        // The shared hook-prompt gate covers Codex prompts too.
+        settings.lock().unwrap().context_hook_prompts = true;
+        let resp = raw_http(addr, &post(AUTH));
+        assert!(resp.starts_with("HTTP/1.1 200"));
+        assert!(rx.try_recv().is_ok());
+        let moment = crate::context::moment_for(&moments, "whence").expect("gate on → moment");
+        assert_eq!(moment.text, "ship it");
+
+        // Out-of-order delivery is dropped at the socket (codex::TurnGuard): a
+        // turn's Stop lands, then its late PostToolUse must not emit.
+        let send = |event: &str| {
+            let body = format!(
+                r#"{{"hook_event_name":"{event}","session_id":"thr_2","turn_id":"t1","cwd":"/w/whence"}}"#
+            );
+            raw_http(
+                addr,
+                &format!(
+                    "POST /codex HTTP/1.1\r\nHost: whence\r\n{AUTH}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        assert!(send("UserPromptSubmit").starts_with("HTTP/1.1 200"));
+        assert_eq!(rx.try_recv().unwrap().kind, WorkKind::Prompt);
+        assert!(send("Stop").starts_with("HTTP/1.1 200"));
+        assert_eq!(rx.try_recv().unwrap().kind, WorkKind::AwaitingInput);
+        assert!(send("PostToolUse").starts_with("HTTP/1.1 200"), "still accepted");
+        assert!(rx.try_recv().is_err(), "late tool use after Stop → dropped");
+
+        // A prompt that lands after its own turn's Stop is still delivered, then
+        // immediately corrected back to awaiting.
+        let send_turn = |event: &str, turn: &str| {
+            let body = format!(
+                r#"{{"hook_event_name":"{event}","session_id":"thr_3","turn_id":"{turn}","cwd":"/w/whence","prompt":"late"}}"#
+            );
+            raw_http(
+                addr,
+                &format!(
+                    "POST /codex HTTP/1.1\r\nHost: whence\r\n{AUTH}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+        };
+        assert!(send_turn("Stop", "t9").starts_with("HTTP/1.1 200"));
+        assert_eq!(rx.try_recv().unwrap().kind, WorkKind::AwaitingInput);
+        assert!(send_turn("UserPromptSubmit", "t9").starts_with("HTTP/1.1 200"));
+        let prompt = rx.try_recv().expect("late prompt still flows");
+        assert_eq!(prompt.kind, WorkKind::Prompt);
+        assert_eq!(prompt.detail.as_deref(), Some("late"));
+        let follow = rx.try_recv().expect("…followed by the awaiting re-assert");
+        assert_eq!(follow.kind, WorkKind::AwaitingInput);
+        assert_eq!(follow.source.as_deref(), Some("thr_3"));
+        assert_eq!(follow.detail, None);
     }
 }

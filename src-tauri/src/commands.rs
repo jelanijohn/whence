@@ -89,6 +89,54 @@ pub fn focus_source(state: State<AppState>, project: String, source: String) -> 
     state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
 }
 
+/// Manually dismiss one source row — the widget's small × on a session that never
+/// dropped on its own (a Codex or Claude session killed before its `SessionEnd`
+/// hook fired, a closed tab the extension never reported, …), which would
+/// otherwise sit in the roster until the idle timeout.
+///
+/// Like `focus_source`, this only *injects an event*: a synthetic `SessionEnd`
+/// for exactly that row's surface + source id ([`dismiss_event`]). The engine
+/// then does what it does for any ended session — drops the row and, if it was
+/// the focused project's last source, closes the block (timeline + NeuroSkill
+/// `:end`) through the normal effect path. No special casing, no engine change.
+///
+/// It is a dismissal, not a mute: if the session is in fact still alive, its
+/// next event brings the row straight back. Whence reports state; it never
+/// hides live work.
+#[tauri::command]
+pub fn dismiss_source(
+    state: State<AppState>,
+    project: String,
+    surface: Surface,
+    source: Option<String>,
+) -> Result<(), String> {
+    let ev = dismiss_event(project, surface, source, chrono::Utc::now().to_rfc3339());
+    state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
+}
+
+/// The synthetic `SessionEnd` behind [`dismiss_source`]. Pure (`now` comes in) so
+/// the "removes exactly that row" contract is fixture-tested against the engine.
+/// `source` must be the row's own id as the snapshot reported it — `None` for a
+/// surface that folds onto one id-less row — because surface + source is the
+/// engine's row key.
+fn dismiss_event(
+    project: String,
+    surface: Surface,
+    source: Option<String>,
+    now_rfc3339: String,
+) -> WorkEvent {
+    WorkEvent {
+        ts: now_rfc3339,
+        surface,
+        project: Some(project),
+        source,
+        source_label: None,
+        kind: WorkKind::SessionEnd,
+        confidence: 1.0,
+        detail: None, // nothing user-authored rides a dismissal
+    }
+}
+
 /// Today's closed focus blocks, oldest first — drives the expanded timeline. Each
 /// carries its stored context stamp, if the block closed with one.
 #[tauri::command]
@@ -398,12 +446,44 @@ pub fn rotate_receiver_token(state: State<AppState>) -> Result<ReceiverAuth, Str
         write_json_pretty(&path, &merged)
     })();
 
-    let mut auth = get_receiver_auth(state);
+    // Same for Codex hooks, whose command line carries the token as a header.
+    // `Ok(true)` = rewritten: Codex trusts hooks by content hash, so the changed
+    // entries stay skipped until re-approved — say so rather than go quiet.
+    let codex_refresh = (|| -> Result<bool, String> {
+        let url = codex_receiver_url(&state);
+        let path = codex_hooks_path()?;
+        let existing = read_json_object(&path)?;
+        if !has_hooks(&existing, &CODEX_HOOK_EVENTS, &|h| is_codex_hook_under(h, &url)) {
+            return Ok(false);
+        }
+        let token = crate::auth::read_token(&state.receiver_token).clone();
+        let merged = merge_codex_config(remove_codex_config(existing, &url), &url, &token);
+        write_json_pretty(&path, &merged).map(|_| true)
+    })();
+
+    let mut warnings: Vec<String> = Vec::new();
     if let Err(e) = refresh {
-        auth.warning = Some(format!(
+        warnings.push(format!(
             "Token rotated, but the installed Claude hooks could not be updated ({e}) — \
              re-run Install hooks"
         ));
+    }
+    match codex_refresh {
+        Ok(true) => warnings.push(
+            "Codex hooks were updated with the new token — approve them again in \
+             Codex / ChatGPT (Settings → Hooks) before they run"
+                .to_string(),
+        ),
+        Ok(false) => {}
+        Err(e) => warnings.push(format!(
+            "Token rotated, but the installed Codex hooks could not be updated ({e}) — \
+             re-run Install Codex hooks"
+        )),
+    }
+
+    let mut auth = get_receiver_auth(state);
+    if !warnings.is_empty() {
+        auth.warning = Some(warnings.join(" "));
     }
     Ok(auth)
 }
@@ -486,7 +566,28 @@ fn whence_hook(url: &str) -> serde_json::Value {
 /// a matcher group whose `hooks` list contains our `{type:"http", url}` entry —
 /// adding it only if absent (keyed by `url`). Every other key, and any hooks the
 /// user configured themselves, are left untouched. Pure — unit-tested.
-fn merge_hook_config(mut root: serde_json::Value, url: &str) -> serde_json::Value {
+fn merge_hook_config(root: serde_json::Value, url: &str) -> serde_json::Value {
+    merge_hooks(root, &HOOK_EVENTS, &whence_hook(url), &|h| is_whence_hook(h, url))
+}
+
+/// Remove every Whence `http` hook (any entry under `base` — with or without an
+/// embedded token) from a settings object, pruning now-empty matcher groups and
+/// empty event arrays so an uninstall round-trips back to the pre-install shape.
+/// Pure — unit-tested.
+fn remove_hook_config(root: serde_json::Value, base: &str) -> serde_json::Value {
+    remove_hooks(root, &HOOK_EVENTS, &|h| is_whence_hook_under(h, base))
+}
+
+/// The shared merge behind both hook dialects (Claude Code `settings.json`, Codex
+/// `hooks.json` — same `hooks.<Event>[].hooks[]` shape). For each of `events`,
+/// appends a match-everything group holding `entry` unless a hook satisfying
+/// `is_same` is already there. Touches nothing else. Pure.
+fn merge_hooks(
+    mut root: serde_json::Value,
+    events: &[&str],
+    entry: &serde_json::Value,
+    is_same: &dyn Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
     let obj = ensure_object(&mut root);
     let hooks = obj
         .entry("hooks")
@@ -495,40 +596,42 @@ fn merge_hook_config(mut root: serde_json::Value, url: &str) -> serde_json::Valu
         return root; // `hooks` is some non-object the user owns; don't fight it.
     };
 
-    for event in HOOK_EVENTS {
+    for event in events {
         let groups = hooks_obj
             .entry(event.to_string())
             .or_insert_with(|| serde_json::Value::Array(vec![]));
         let Some(arr) = groups.as_array_mut() else { continue };
 
-        if hook_present(arr, url) {
+        if any_hook(arr, is_same) {
             continue; // already installed — idempotent.
         }
         arr.push(serde_json::json!({
             "matcher": "",
-            "hooks": [whence_hook(url)],
+            "hooks": [entry.clone()],
         }));
     }
     root
 }
 
-/// Remove every Whence `http` hook (any entry under `base` — with or without an
-/// embedded token) from a settings object, pruning now-empty matcher groups and
-/// empty event arrays so an uninstall round-trips back to the pre-install shape.
-/// Pure — unit-tested.
-fn remove_hook_config(mut root: serde_json::Value, base: &str) -> serde_json::Value {
+/// The shared removal: drop every hook under `events` satisfying `is_ours`, then
+/// the matcher groups, event arrays and `hooks` key that leaves empty. Pure.
+fn remove_hooks(
+    mut root: serde_json::Value,
+    events: &[&str],
+    is_ours: &dyn Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
     let Some(obj) = root.as_object_mut() else { return root };
     let Some(hooks_obj) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return root;
     };
 
-    for event in HOOK_EVENTS {
-        let Some(groups) = hooks_obj.get_mut(event).and_then(|g| g.as_array_mut()) else {
+    for event in events {
+        let Some(groups) = hooks_obj.get_mut(*event).and_then(|g| g.as_array_mut()) else {
             continue;
         };
         for group in groups.iter_mut() {
             if let Some(list) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                list.retain(|h| !is_whence_hook_under(h, base));
+                list.retain(|h| !is_ours(h));
             }
         }
         // Drop matcher groups left with no hooks, then the event key if now empty.
@@ -546,15 +649,38 @@ fn remove_hook_config(mut root: serde_json::Value, base: &str) -> serde_json::Va
     root
 }
 
-/// True if `arr` (an event's matcher groups) already contains our hook for `url`.
-fn hook_present(arr: &[serde_json::Value], url: &str) -> bool {
+/// Whether any hook under `events` satisfies `is_ours` — the "installed?" probe.
+fn has_hooks(
+    root: &serde_json::Value,
+    events: &[&str],
+    is_ours: &dyn Fn(&serde_json::Value) -> bool,
+) -> bool {
+    let Some(hooks_obj) = root.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    events.iter().any(|event| {
+        hooks_obj
+            .get(*event)
+            .and_then(|g| g.as_array())
+            .is_some_and(|groups| any_hook(groups, is_ours))
+    })
+}
+
+/// True if any hook in `arr` (an event's matcher groups) satisfies `pred`.
+fn any_hook(arr: &[serde_json::Value], pred: &dyn Fn(&serde_json::Value) -> bool) -> bool {
     arr.iter().any(|group| {
         group
             .get("hooks")
             .and_then(|h| h.as_array())
-            .map(|list| list.iter().any(|h| is_whence_hook(h, url)))
-            .unwrap_or(false)
+            .is_some_and(|list| list.iter().any(pred))
     })
+}
+
+/// True if `arr` (an event's matcher groups) already contains our hook for `url`.
+/// Test-only since the merge path generalized over `any_hook`.
+#[cfg(test)]
+fn hook_present(arr: &[serde_json::Value], url: &str) -> bool {
+    any_hook(arr, &|h| is_whence_hook(h, url))
 }
 
 /// A hook entry is ours iff it's an `http` hook pointed at exactly our `url`
@@ -580,23 +706,138 @@ fn is_whence_hook_under(h: &serde_json::Value, base: &str) -> bool {
 /// Whether a settings object carries any Whence hook entry under `base` — the
 /// "were hooks installed?" probe the rotation refresh keys on.
 fn config_has_whence_hooks(root: &serde_json::Value, base: &str) -> bool {
-    let Some(hooks_obj) = root.get("hooks").and_then(|h| h.as_object()) else {
+    has_hooks(root, &HOOK_EVENTS, &|h| is_whence_hook_under(h, base))
+}
+
+// ── Codex / ChatGPT Work hooks ───────────────────────────────────────────────
+
+/// The Codex lifecycle events Whence registers `command` hooks for (see
+/// `adapters/codex.rs` for the mapping). `PostToolUse` *is* here, unlike the
+/// Claude Code set — Codex has no transcript watcher, so it's the only activity
+/// signal mid-turn. `PermissionRequest` stands in for Claude's `Notification`.
+const CODEX_HOOK_EVENTS: [&str; 6] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PostToolUse",
+    "PermissionRequest",
+    "Stop",
+    "SessionEnd",
+];
+
+/// `curl`'s own whole-request cap (seconds). Tighter than [`HOOK_TIMEOUT_SECS`]
+/// because Codex always runs `SessionEnd` hooks synchronously with a hard ~3 s
+/// ceiling — a down Whence must cost a closing session at most this.
+const CODEX_CURL_MAX_SECS: u32 = 2;
+
+/// Install (opt-in) the Codex `command` hooks that pipe each event to Whence's
+/// hooks receiver. Merge-preserving write to `$CODEX_HOME/hooks.json` (default
+/// `~/.codex/hooks.json`), same round-trip discipline as the Claude install.
+///
+/// Installing is only half of it: Codex trusts hooks by content hash, so the new
+/// entries are *skipped* until the user approves them in Codex's hook review —
+/// and the `codex_enabled` setting must be on for the receiver to act on them.
+#[tauri::command]
+pub fn install_codex_hooks(state: State<AppState>) -> Result<(), String> {
+    let url = codex_receiver_url(&state);
+    let token = crate::auth::read_token(&state.receiver_token).clone();
+    let path = codex_hooks_path()?;
+    let existing = read_json_object(&path)?;
+    write_json_pretty(&path, &merge_codex_config(remove_codex_config(existing, &url), &url, &token))
+}
+
+/// Remove Whence's Codex hooks from `hooks.json`, leaving all other hooks intact.
+/// Matches by receiver URL, so entries carrying any token generation are removed.
+#[tauri::command]
+pub fn uninstall_codex_hooks(state: State<AppState>) -> Result<(), String> {
+    let url = codex_receiver_url(&state);
+    let path = codex_hooks_path()?;
+    let existing = read_json_object(&path)?;
+    // Nothing of ours there (or no file at all) → don't create or rewrite it.
+    if !has_hooks(&existing, &CODEX_HOOK_EVENTS, &|h| is_codex_hook_under(h, &url)) {
+        return Ok(());
+    }
+    write_json_pretty(&path, &remove_codex_config(existing, &url))
+}
+
+/// The receiver URL a Codex hook POSTs to — `http://<bind>/codex`. Token-less (it
+/// rides in a header), so this is also the identity any generation of our Codex
+/// entry is recognized by. `/codex` is what `hooks::route` keys on.
+fn codex_receiver_url(state: &State<AppState>) -> String {
+    let addr = state
+        .settings
+        .lock()
+        .map(|g| g.hook_listen_addr())
+        .unwrap_or_else(|_| settings::DEFAULT_HOOK_ADDR.to_string());
+    format!("http://{addr}/codex")
+}
+
+/// `$CODEX_HOME/hooks.json`, else `<home>/.codex/hooks.json` — Codex's user-scope
+/// hook file, so the hooks fire for every local session regardless of project.
+fn codex_hooks_path() -> Result<PathBuf, String> {
+    codex_hooks_path_from(
+        std::env::var_os("CODEX_HOME").map(PathBuf::from),
+        crate::adapters::claude_code::home_dir(),
+    )
+    .ok_or_else(|| "could not resolve the Codex config dir — set CODEX_HOME".to_string())
+}
+
+/// Pure half of [`codex_hooks_path`] — unit-tested. A blank `CODEX_HOME` is unset.
+fn codex_hooks_path_from(codex_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    codex_home
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".codex")))
+        .map(|dir| dir.join("hooks.json"))
+}
+
+/// Our Codex hook spec. Codex has no `http` hook type, so this is a `command`
+/// that pipes the event JSON it gets on stdin straight to the receiver with
+/// `curl` (ships with macOS, and with Windows 10+ as `curl.exe`).
+///
+/// * `async: true` — Codex doesn't wait on it, and a background hook can't block
+///   or alter the turn; `-m` bounds the request itself for the events Codex runs
+///   synchronously regardless (`SessionEnd`).
+/// * `"@-"` is quoted because a bare `@` is PowerShell's splat operator.
+/// * `commandWindows` names `curl.exe` — in Windows PowerShell plain `curl` is an
+///   alias for `Invoke-WebRequest`. The POSIX form adds `|| true` so a Whence
+///   that isn't running never surfaces as a failed hook.
+/// * The token is hex (`auth.rs`), so it needs no shell escaping.
+fn codex_hook(url: &str, token: &str) -> serde_json::Value {
+    let args = format!(
+        "-sm{CODEX_CURL_MAX_SECS} -H \"Authorization: Bearer {token}\" \
+         -H \"Content-Type: application/json\" --data-binary \"@-\" {url}"
+    );
+    serde_json::json!({
+        "type": "command",
+        "command": format!("curl {args} || true"),
+        "commandWindows": format!("curl.exe {args}"),
+        "timeout": HOOK_TIMEOUT_SECS,
+        "async": true,
+    })
+}
+
+/// Merge our Codex hooks into a `hooks.json` object, idempotently. Pure.
+fn merge_codex_config(root: serde_json::Value, url: &str, token: &str) -> serde_json::Value {
+    let entry = codex_hook(url, token);
+    merge_hooks(root, &CODEX_HOOK_EVENTS, &entry, &|h| h == &entry)
+}
+
+/// Remove every generation of our Codex hooks from a `hooks.json` object. Pure.
+fn remove_codex_config(root: serde_json::Value, url: &str) -> serde_json::Value {
+    remove_hooks(root, &CODEX_HOOK_EVENTS, &|h| is_codex_hook_under(h, url))
+}
+
+/// A Codex hook entry is ours iff it's a `command` hook whose command line (either
+/// platform's) has our receiver `url` as a whole argument — whatever token it
+/// carries. Whole-argument, so a user's own hook that merely mentions a longer
+/// URL (`…/codex-audit`) never matches.
+fn is_codex_hook_under(h: &serde_json::Value, url: &str) -> bool {
+    if h.get("type").and_then(|t| t.as_str()) != Some("command") {
         return false;
-    };
-    HOOK_EVENTS.iter().any(|event| {
-        hooks_obj
-            .get(*event)
-            .and_then(|g| g.as_array())
-            .map(|groups| {
-                groups.iter().any(|group| {
-                    group
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .map(|list| list.iter().any(|h| is_whence_hook_under(h, base)))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
+    }
+    ["command", "commandWindows"].iter().any(|key| {
+        h.get(*key)
+            .and_then(|c| c.as_str())
+            .is_some_and(|cmd| cmd.split_whitespace().any(|arg| arg.trim_matches(['"', '\'']) == url))
     })
 }
 
@@ -613,6 +854,192 @@ mod tests {
     use super::*;
 
     const URL: &str = "http://127.0.0.1:18450/hook";
+    const CODEX_URL: &str = "http://127.0.0.1:18450/codex";
+
+    /// A live event on `project` from one (surface, source) row.
+    fn live(secs: u32, surface: Surface, source: Option<&str>, kind: WorkKind) -> WorkEvent {
+        WorkEvent {
+            ts: format!("2026-11-22T12:00:{secs:02}Z"),
+            surface,
+            project: Some("whence".into()),
+            source: source.map(str::to_string),
+            source_label: None,
+            kind,
+            confidence: 1.0,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn dismiss_removes_exactly_the_targeted_row() {
+        use crate::engine::segment::{Effect, SegmentConfig, Segmenter};
+
+        let mut seg = Segmenter::new(SegmentConfig::default());
+        seg.ingest(&live(0, Surface::Codex, Some("thr_1"), WorkKind::Prompt));
+        seg.ingest(&live(1, Surface::Codex, Some("thr_2"), WorkKind::Prompt));
+        seg.ingest(&live(2, Surface::ClaudeCode, None, WorkKind::Prompt));
+        // thr_1 is the stuck one: awaiting forever, its SessionEnd never came.
+        seg.ingest(&live(3, Surface::Codex, Some("thr_1"), WorkKind::AwaitingInput));
+        let rows = |seg: &Segmenter| -> Vec<(Surface, Option<String>)> {
+            seg.snapshot()
+                .projects
+                .into_iter()
+                .flat_map(|p| p.sources)
+                .map(|s| (s.surface, s.source))
+                .collect()
+        };
+        assert_eq!(rows(&seg).len(), 3);
+
+        let now = || "2026-11-22T12:00:10Z".to_string();
+        let fx = seg.ingest(&dismiss_event(
+            "whence".into(),
+            Surface::Codex,
+            Some("thr_1".into()),
+            now(),
+        ));
+        let left = rows(&seg);
+        assert_eq!(left.len(), 2, "only the dismissed row goes");
+        assert!(!left.contains(&(Surface::Codex, Some("thr_1".into()))));
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::BlockClosed(_))),
+            "other sources keep the project's block open"
+        );
+
+        // An id-less row is addressed by `source: None`.
+        seg.ingest(&dismiss_event("whence".into(), Surface::ClaudeCode, None, now()));
+        assert_eq!(rows(&seg), vec![(Surface::Codex, Some("thr_2".to_string()))]);
+
+        // Dismissing the last source closes the block and drops the project.
+        let fx = seg.ingest(&dismiss_event(
+            "whence".into(),
+            Surface::Codex,
+            Some("thr_2".into()),
+            now(),
+        ));
+        // The block keeps what it accrued: it ends at the project's last real
+        // activity (12:00:03, on a source dismissed *earlier*), not at its start
+        // and not at the dismissal time.
+        let block = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::BlockClosed(b) => Some(b),
+                _ => None,
+            })
+            .expect("last source dismissed → block closes");
+        assert_eq!(block.end - block.start, 3);
+        assert!(seg.snapshot().projects.is_empty());
+
+        // Not a mute: a session that is in fact alive comes straight back.
+        seg.ingest(&live(20, Surface::Codex, Some("thr_2"), WorkKind::ToolUse));
+        assert_eq!(rows(&seg).len(), 1);
+    }
+
+    #[test]
+    fn dismiss_surface_arg_uses_the_wire_names() {
+        // The widget passes `SourceSnapshot.surface` straight back; the command arg
+        // must accept exactly those kebab-case strings.
+        for (wire, surface) in [
+            ("claude-code", Surface::ClaudeCode),
+            ("codex", Surface::Codex),
+            ("browser", Surface::Browser),
+            ("terminal", Surface::Terminal),
+            ("ollama", Surface::Ollama),
+        ] {
+            assert_eq!(serde_json::from_value::<Surface>(wire.into()).unwrap(), surface);
+        }
+    }
+
+    #[test]
+    fn codex_hook_is_a_background_curl_pipe() {
+        let h = codex_hook(CODEX_URL, "abc123");
+        assert_eq!(h["type"], "command");
+        assert_eq!(h["async"], true, "must never hold up a Codex turn");
+        assert_eq!(h["timeout"], HOOK_TIMEOUT_SECS);
+        assert_eq!(
+            h["command"],
+            "curl -sm2 -H \"Authorization: Bearer abc123\" -H \"Content-Type: application/json\" \
+             --data-binary \"@-\" http://127.0.0.1:18450/codex || true"
+        );
+        // PowerShell aliases bare `curl`; and no `||` there (a parse error in 5.x).
+        let win = h["commandWindows"].as_str().unwrap();
+        assert!(win.starts_with("curl.exe -sm2 "));
+        assert!(win.ends_with(CODEX_URL));
+        assert!(is_codex_hook_under(&h, CODEX_URL));
+    }
+
+    #[test]
+    fn codex_merge_preserves_user_hooks_and_is_idempotent() {
+        let existing = serde_json::json!({
+            "description": "my hooks",
+            "hooks": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "say done" }] }],
+                "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "lint" }] }]
+            }
+        });
+        let once = merge_codex_config(existing.clone(), CODEX_URL, "tok");
+        assert_eq!(once["description"], "my hooks");
+        assert_eq!(once["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"]);
+        for event in CODEX_HOOK_EVENTS {
+            let arr = once["hooks"][event].as_array().unwrap();
+            assert!(any_hook(arr, &|h| is_codex_hook_under(h, CODEX_URL)), "{event} missing");
+        }
+        // The user's own Stop hook sits beside ours.
+        assert_eq!(once["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(merge_codex_config(once.clone(), CODEX_URL, "tok"), once);
+        // Uninstall round-trips to exactly what the user had.
+        assert_eq!(remove_codex_config(once, CODEX_URL), existing);
+    }
+
+    #[test]
+    fn codex_install_converges_across_token_rotation() {
+        let old = merge_codex_config(serde_json::json!({}), CODEX_URL, "old");
+        // What install/rotate do: prune every generation, then merge the current.
+        let new = merge_codex_config(remove_codex_config(old, CODEX_URL), CODEX_URL, "new");
+        for event in CODEX_HOOK_EVENTS {
+            let groups = new["hooks"][event].as_array().unwrap();
+            assert_eq!(groups.len(), 1, "{event} accumulated a stale hook");
+            assert!(groups[0]["hooks"][0]["command"].as_str().unwrap().contains("Bearer new"));
+        }
+        // Uninstalling from a file holding only ours leaves no `hooks` key behind.
+        assert_eq!(remove_codex_config(new, CODEX_URL), serde_json::json!({}));
+    }
+
+    #[test]
+    fn codex_hook_match_is_whole_argument() {
+        let cmd = |c: &str| serde_json::json!({ "type": "command", "command": c });
+        assert!(is_codex_hook_under(&cmd("curl -d @- http://127.0.0.1:18450/codex"), CODEX_URL));
+        assert!(is_codex_hook_under(&cmd("curl \"http://127.0.0.1:18450/codex\""), CODEX_URL));
+        // Lookalikes and other hooks are never ours.
+        assert!(!is_codex_hook_under(&cmd("curl http://127.0.0.1:18450/codex-audit"), CODEX_URL));
+        assert!(!is_codex_hook_under(&cmd("curl http://127.0.0.1:18450/codex/extra"), CODEX_URL));
+        assert!(!is_codex_hook_under(&cmd("curl http://127.0.0.1:9999/codex"), CODEX_URL));
+        assert!(!is_codex_hook_under(&cmd("python3 ~/.codex/hooks/stop.py"), CODEX_URL));
+        // Right URL, wrong handler type.
+        let mcp = serde_json::json!({ "type": "mcp_tool", "command": format!("curl {CODEX_URL}") });
+        assert!(!is_codex_hook_under(&mcp, CODEX_URL));
+        // The Claude `http` entry and the Codex `command` entry never cross-match.
+        assert!(!is_codex_hook_under(&whence_hook(URL), CODEX_URL));
+        assert!(!is_whence_hook_under(&codex_hook(CODEX_URL, "t"), URL));
+    }
+
+    #[test]
+    fn codex_hooks_path_prefers_codex_home() {
+        let home = Some(PathBuf::from("/Users/u"));
+        assert_eq!(
+            codex_hooks_path_from(Some(PathBuf::from("/opt/codex")), home.clone()),
+            Some(PathBuf::from("/opt/codex/hooks.json"))
+        );
+        assert_eq!(
+            codex_hooks_path_from(None, home.clone()),
+            Some(PathBuf::from("/Users/u/.codex/hooks.json"))
+        );
+        // A blank CODEX_HOME counts as unset; nothing resolvable → None.
+        assert_eq!(
+            codex_hooks_path_from(Some(PathBuf::new()), home),
+            Some(PathBuf::from("/Users/u/.codex/hooks.json"))
+        );
+        assert_eq!(codex_hooks_path_from(None, None), None);
+    }
 
     #[test]
     fn merge_adds_all_events_and_preserves_unrelated_keys() {

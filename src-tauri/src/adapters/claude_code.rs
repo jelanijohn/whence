@@ -29,7 +29,7 @@ use crate::context::{self, SharedRoots};
 /// The user's home directory. `HOME` on Unix; Windows doesn't set it, so fall back
 /// to `USERPROFILE` — the assumption that Whence always runs under WSL2 (where
 /// `HOME` exists) died when we started shipping native builds.
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

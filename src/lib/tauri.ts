@@ -9,6 +9,7 @@ import type {
   NeuroskillStatus,
   ReceiverAuth,
   BrowserExtensionStatus,
+  Surface,
 } from "./types";
 
 export const FOCUS_EVENT = "whence://focus";
@@ -43,6 +44,18 @@ export function getFocusState(): Promise<FocusSnapshot> {
  *  rows only — `source` is the row's normalized conversation URL. */
 export function focusSource(project: string, source: string): Promise<void> {
   return call("focus_source", { project, source });
+}
+
+/** Dismiss one source row (the ×) — for a session that never dropped on its own.
+ *  `surface` + `source` are the row's own, straight off its `SourceSnapshot`
+ *  (`source` null for an id-less row). Not a mute: a live session reappears on its
+ *  next event. */
+export function dismissSource(
+  project: string,
+  surface: Surface,
+  source: string | null,
+): Promise<void> {
+  return call("dismiss_source", { project, surface, source });
 }
 
 /** Today's closed focus blocks, oldest first — drives the expanded timeline. */
@@ -93,6 +106,18 @@ export function installClaudeHooks(): Promise<void> {
 /** Remove Whence's Claude Code hooks, leaving other config intact. */
 export function uninstallClaudeHooks(): Promise<void> {
   return call("uninstall_claude_hooks");
+}
+
+/** Install (opt-in) the Codex `command` hooks that pipe ChatGPT Work / Codex
+ *  local-session events to the hooks receiver. Merge-preserving write to
+ *  $CODEX_HOME/hooks.json; Codex still has to approve them before they run. */
+export function installCodexHooks(): Promise<void> {
+  return call("install_codex_hooks");
+}
+
+/** Remove Whence's Codex hooks, leaving other hooks intact. */
+export function uninstallCodexHooks(): Promise<void> {
+  return call("uninstall_codex_hooks");
 }
 
 /** Receiver-auth state: the bearer token gating the loopback receivers, its file
