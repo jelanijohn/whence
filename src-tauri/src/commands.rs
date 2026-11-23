@@ -89,6 +89,54 @@ pub fn focus_source(state: State<AppState>, project: String, source: String) -> 
     state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
 }
 
+/// Manually dismiss one source row — the widget's small × on a session that never
+/// dropped on its own (a Codex or Claude session killed before its `SessionEnd`
+/// hook fired, a closed tab the extension never reported, …), which would
+/// otherwise sit in the roster until the idle timeout.
+///
+/// Like `focus_source`, this only *injects an event*: a synthetic `SessionEnd`
+/// for exactly that row's surface + source id ([`dismiss_event`]). The engine
+/// then does what it does for any ended session — drops the row and, if it was
+/// the focused project's last source, closes the block (timeline + NeuroSkill
+/// `:end`) through the normal effect path. No special casing, no engine change.
+///
+/// It is a dismissal, not a mute: if the session is in fact still alive, its
+/// next event brings the row straight back. Whence reports state; it never
+/// hides live work.
+#[tauri::command]
+pub fn dismiss_source(
+    state: State<AppState>,
+    project: String,
+    surface: Surface,
+    source: Option<String>,
+) -> Result<(), String> {
+    let ev = dismiss_event(project, surface, source, chrono::Utc::now().to_rfc3339());
+    state.tx.send(ev).map_err(|_| "core task unavailable".to_string())
+}
+
+/// The synthetic `SessionEnd` behind [`dismiss_source`]. Pure (`now` comes in) so
+/// the "removes exactly that row" contract is fixture-tested against the engine.
+/// `source` must be the row's own id as the snapshot reported it — `None` for a
+/// surface that folds onto one id-less row — because surface + source is the
+/// engine's row key.
+fn dismiss_event(
+    project: String,
+    surface: Surface,
+    source: Option<String>,
+    now_rfc3339: String,
+) -> WorkEvent {
+    WorkEvent {
+        ts: now_rfc3339,
+        surface,
+        project: Some(project),
+        source,
+        source_label: None,
+        kind: WorkKind::SessionEnd,
+        confidence: 1.0,
+        detail: None, // nothing user-authored rides a dismissal
+    }
+}
+
 /// Today's closed focus blocks, oldest first — drives the expanded timeline. Each
 /// carries its stored context stamp, if the block closed with one.
 #[tauri::command]
@@ -807,6 +855,89 @@ mod tests {
 
     const URL: &str = "http://127.0.0.1:18450/hook";
     const CODEX_URL: &str = "http://127.0.0.1:18450/codex";
+
+    /// A live event on `project` from one (surface, source) row.
+    fn live(secs: u32, surface: Surface, source: Option<&str>, kind: WorkKind) -> WorkEvent {
+        WorkEvent {
+            ts: format!("2026-11-22T12:00:{secs:02}Z"),
+            surface,
+            project: Some("whence".into()),
+            source: source.map(str::to_string),
+            source_label: None,
+            kind,
+            confidence: 1.0,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn dismiss_removes_exactly_the_targeted_row() {
+        use crate::engine::segment::{Effect, SegmentConfig, Segmenter};
+
+        let mut seg = Segmenter::new(SegmentConfig::default());
+        seg.ingest(&live(0, Surface::Codex, Some("thr_1"), WorkKind::Prompt));
+        seg.ingest(&live(1, Surface::Codex, Some("thr_2"), WorkKind::Prompt));
+        seg.ingest(&live(2, Surface::ClaudeCode, None, WorkKind::Prompt));
+        // thr_1 is the stuck one: awaiting forever, its SessionEnd never came.
+        seg.ingest(&live(3, Surface::Codex, Some("thr_1"), WorkKind::AwaitingInput));
+        let rows = |seg: &Segmenter| -> Vec<(Surface, Option<String>)> {
+            seg.snapshot()
+                .projects
+                .into_iter()
+                .flat_map(|p| p.sources)
+                .map(|s| (s.surface, s.source))
+                .collect()
+        };
+        assert_eq!(rows(&seg).len(), 3);
+
+        let now = || "2026-11-22T12:00:10Z".to_string();
+        let fx = seg.ingest(&dismiss_event(
+            "whence".into(),
+            Surface::Codex,
+            Some("thr_1".into()),
+            now(),
+        ));
+        let left = rows(&seg);
+        assert_eq!(left.len(), 2, "only the dismissed row goes");
+        assert!(!left.contains(&(Surface::Codex, Some("thr_1".into()))));
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::BlockClosed(_))),
+            "other sources keep the project's block open"
+        );
+
+        // An id-less row is addressed by `source: None`.
+        seg.ingest(&dismiss_event("whence".into(), Surface::ClaudeCode, None, now()));
+        assert_eq!(rows(&seg), vec![(Surface::Codex, Some("thr_2".to_string()))]);
+
+        // Dismissing the last source closes the block and drops the project.
+        let fx = seg.ingest(&dismiss_event(
+            "whence".into(),
+            Surface::Codex,
+            Some("thr_2".into()),
+            now(),
+        ));
+        assert!(fx.iter().any(|e| matches!(e, Effect::BlockClosed(_))));
+        assert!(seg.snapshot().projects.is_empty());
+
+        // Not a mute: a session that is in fact alive comes straight back.
+        seg.ingest(&live(20, Surface::Codex, Some("thr_2"), WorkKind::ToolUse));
+        assert_eq!(rows(&seg).len(), 1);
+    }
+
+    #[test]
+    fn dismiss_surface_arg_uses_the_wire_names() {
+        // The widget passes `SourceSnapshot.surface` straight back; the command arg
+        // must accept exactly those kebab-case strings.
+        for (wire, surface) in [
+            ("claude-code", Surface::ClaudeCode),
+            ("codex", Surface::Codex),
+            ("browser", Surface::Browser),
+            ("terminal", Surface::Terminal),
+            ("ollama", Surface::Ollama),
+        ] {
+            assert_eq!(serde_json::from_value::<Surface>(wire.into()).unwrap(), surface);
+        }
+    }
 
     #[test]
     fn codex_hook_is_a_background_curl_pipe() {

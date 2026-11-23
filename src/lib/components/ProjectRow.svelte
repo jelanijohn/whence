@@ -14,6 +14,7 @@
     expanded,
     onToggle,
     onActivate,
+    onDismiss,
   }: {
     project: ProjectSnapshot;
     // The focused project's context string (git branch · commit) — set only on the
@@ -23,6 +24,8 @@
     onToggle: () => void;
     // Fired when a (browser) source row is clicked: raise its tab + focus the project.
     onActivate?: (project: string, source: SourceSnapshot) => void;
+    // Fired by a source row's ×: drop a session that never ended on its own.
+    onDismiss?: (project: string, source: SourceSnapshot) => void;
   } = $props();
 
   // Present vs running (§7) — a subtle qualifier on the active project only, so the
@@ -84,7 +87,11 @@
 
   {#if expanded}
     {#each project.sources as source (source.source ?? source.label)}
-      <SourceRow {source} onActivate={() => onActivate?.(project.project, source)} />
+      <SourceRow
+        {source}
+        onActivate={() => onActivate?.(project.project, source)}
+        onDismiss={onDismiss ? () => onDismiss(project.project, source) : undefined}
+      />
     {/each}
   {/if}
 </div>

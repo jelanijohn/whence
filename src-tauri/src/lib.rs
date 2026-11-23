@@ -240,6 +240,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_focus_state,
             commands::focus_source,
+            commands::dismiss_source,
             commands::get_today_blocks,
             commands::get_focus_intensity,
             commands::get_neuroskill_status,

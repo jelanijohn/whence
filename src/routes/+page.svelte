@@ -15,6 +15,7 @@
     getTodayBlocks,
     getFocusIntensity,
     focusSource,
+    dismissSource,
     openSettings,
   } from "$lib/tauri";
   import type { FocusBlock, SourceSnapshot } from "$lib/types";
@@ -83,6 +84,16 @@
       await focusSource(project, source.source);
     } catch {
       // No backend (e.g. `vite dev`) — nothing to raise.
+    }
+  }
+
+  // The × on a source row: drop a session that never ended on its own. The backend
+  // answers with a fresh snapshot, so there's nothing to update locally.
+  async function removeSource(project: string, source: SourceSnapshot) {
+    try {
+      await dismissSource(project, source.surface, source.source ?? null);
+    } catch {
+      // No backend (e.g. `vite dev`) — nothing to dismiss.
     }
   }
 
@@ -226,6 +237,7 @@
           expanded={expanded.has(project.project)}
           onToggle={() => toggle(project.project)}
           onActivate={activateSource}
+          onDismiss={removeSource}
         />
       {/each}
     {/if}

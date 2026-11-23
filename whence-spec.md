@@ -280,6 +280,14 @@ raises its tab (the extension polls a raise queue via `GET /raise`) and pins
 focus to that project via the `focus_source` command — a you-acted switch
 through the normal engine path, not a bypass.
 
+Every source row also carries a small **×** (shown on hover): `dismiss_source`
+injects a synthetic `SessionEnd` for exactly that row's surface + source id, so
+a session that never dropped on its own — killed before its end hook fired, a
+tab never reported closed — leaves the roster without waiting out the idle
+timeout. Same normal engine path: the row drops and, if it was the focused
+project's last source, the block closes. It is a dismissal, not a mute: a
+session that is actually alive reappears on its next event.
+
 **Opt-in, default off** (`browser_enabled`), and it needs the extension
 installed. Resolution and event mapping are fixture-tested; only the socket and
 store I/O are impure. The extension's DOM selectors are brittle by construction

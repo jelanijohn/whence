@@ -222,6 +222,7 @@ function respond(cmd: string, args?: Record<string, unknown>): unknown {
       // Null = extension hasn't reported this launch; the diagnostic line hides.
       return null;
     case "focus_source":
+    case "dismiss_source":
     case "open_settings":
     case "install_claude_hooks":
     case "uninstall_claude_hooks":
