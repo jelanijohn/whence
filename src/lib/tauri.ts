@@ -95,6 +95,18 @@ export function uninstallClaudeHooks(): Promise<void> {
   return call("uninstall_claude_hooks");
 }
 
+/** Install (opt-in) the Codex `command` hooks that pipe ChatGPT Work / Codex
+ *  local-session events to the hooks receiver. Merge-preserving write to
+ *  $CODEX_HOME/hooks.json; Codex still has to approve them before they run. */
+export function installCodexHooks(): Promise<void> {
+  return call("install_codex_hooks");
+}
+
+/** Remove Whence's Codex hooks, leaving other hooks intact. */
+export function uninstallCodexHooks(): Promise<void> {
+  return call("uninstall_codex_hooks");
+}
+
 /** Receiver-auth state: the bearer token gating the loopback receivers, its file
  *  path, and the rejected-request counter. Drives the Settings auth section. */
 export function getReceiverAuth(): Promise<ReceiverAuth> {

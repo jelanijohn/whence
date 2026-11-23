@@ -8,6 +8,7 @@
 pub mod browser;
 pub mod browser_map;
 pub mod claude_code;
+pub mod codex;
 pub mod hooks;
 pub mod ollama;
 pub mod terminal;
@@ -26,6 +27,11 @@ pub enum Surface {
     /// Browser-hosted AI chat (claude.ai, chatgpt.com, …), via the first-party
     /// Whence extension POSTing to the loopback receiver. See `adapters/browser.rs`.
     Browser,
+    /// OpenAI Codex local sessions (the CLI and ChatGPT Desktop's *Work → Local*
+    /// mode), via `command` hooks POSTing to the hooks receiver. See
+    /// `adapters/codex.rs`. Nothing identifies the owning client, so the CLI and
+    /// the desktop app are one surface.
+    Codex,
 }
 
 /// The kind of activity. Serializes snake_case to match the TS union.

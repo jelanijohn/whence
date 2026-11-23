@@ -5,6 +5,8 @@
     setSettings,
     installClaudeHooks,
     uninstallClaudeHooks,
+    installCodexHooks,
+    uninstallCodexHooks,
     getBrowserMappingPath,
     getBrowserExtensionStatus,
     getReceiverAuth,
@@ -29,6 +31,7 @@
     neuroskillDataDir: string;
     eegReadbackEnabled: boolean;
     claudeDir: string;
+    codexEnabled: boolean;
     ollamaEnabled: boolean;
     ollamaEndpoint: string;
     terminalEnabled: boolean;
@@ -79,6 +82,7 @@
       neuroskillDataDir: s.neuroskillDataDir ?? "",
       eegReadbackEnabled: s.eegReadbackEnabled,
       claudeDir: s.claudeDir ?? "",
+      codexEnabled: s.codexEnabled,
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? "",
       terminalEnabled: s.terminalEnabled,
@@ -123,6 +127,7 @@
       neuroskillDataDir: d.neuroskillDataDir.trim() || null,
       eegReadbackEnabled: d.eegReadbackEnabled,
       claudeDir: d.claudeDir.trim() || null,
+      codexEnabled: d.codexEnabled,
       ollamaEnabled: d.ollamaEnabled,
       ollamaEndpoint: d.ollamaEndpoint.trim() || null,
       terminalEnabled: d.terminalEnabled,
@@ -155,6 +160,7 @@
       neuroskillDataDir: s.neuroskillDataDir ?? null,
       eegReadbackEnabled: s.eegReadbackEnabled,
       claudeDir: s.claudeDir ?? null,
+      codexEnabled: s.codexEnabled,
       ollamaEnabled: s.ollamaEnabled,
       ollamaEndpoint: s.ollamaEndpoint ?? null,
       terminalEnabled: s.terminalEnabled,
@@ -347,6 +353,28 @@
       flash(() => (hooksMsg = null), 2400);
     } catch (e) {
       hooksErr = String(e);
+    } finally {
+      hooksBusy = false;
+    }
+  }
+
+  // Codex hooks — same immediate, reversible side effect, on $CODEX_HOME/hooks.json.
+  // Own message state so feedback shows under the buttons that caused it; the busy
+  // flag is shared (one hook-file write at a time).
+  let codexMsg = $state<string | null>(null);
+  let codexErr = $state<string | null>(null);
+
+  async function runCodexHooks(action: () => Promise<void>, ok: string) {
+    if (hooksBusy) return;
+    hooksBusy = true;
+    codexMsg = null;
+    codexErr = null;
+    try {
+      await action();
+      codexMsg = ok;
+      flash(() => (codexMsg = null), 6000);
+    } catch (e) {
+      codexErr = String(e);
     } finally {
       hooksBusy = false;
     }
@@ -736,6 +764,52 @@
       {:else if hooksMsg}
         <span style="color: var(--accent); font-size: 11px;">{hooksMsg}</span>
       {/if}
+    </div>
+
+    <!-- Codex / ChatGPT Work hooks -->
+    <div class="flex flex-col gap-2" style="border-top: 1px solid var(--border-soft);">
+      <p class="label" style="margin-top: 8px;">Codex / ChatGPT Work hooks</p>
+      <div class="flex items-center justify-between">
+        <Toggle bind:checked={draft.codexEnabled} label="Track Codex sessions" />
+      </div>
+      <p style="color: var(--fg3); font-size: 11px;">
+        Show Codex CLI and ChatGPT desktop <span style="color: var(--fg2);">Work → Local</span>
+        sessions in the roster. Writes hooks into
+        <span class="tabular-nums">.codex/hooks.json</span> (opt-in, reversible). Cloud sessions
+        and ordinary chats don't run local hooks, so they aren't tracked.
+      </p>
+      <div class="flex items-center gap-1.5">
+        <button
+          type="button"
+          style="background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 7px; cursor: pointer;"
+          class:opacity-50={hooksBusy}
+          disabled={hooksBusy}
+          onclick={() =>
+            runCodexHooks(installCodexHooks, "Hooks installed — now approve them in Codex")}
+        >
+          Install hooks
+        </button>
+        <button
+          type="button"
+          style="color: var(--fg2); font-size: 12px; padding: 5px 12px; border-radius: 7px; border: 1px solid var(--border-soft); cursor: pointer;"
+          class:opacity-50={hooksBusy}
+          disabled={hooksBusy}
+          onclick={() => runCodexHooks(uninstallCodexHooks, "Hooks removed")}
+        >
+          Remove
+        </button>
+      </div>
+      {#if codexErr}
+        <span style="color: #d9544f; font-size: 11px;" title={codexErr} class="truncate">{codexErr}</span>
+      {:else if codexMsg}
+        <span style="color: var(--accent); font-size: 11px;">{codexMsg}</span>
+      {/if}
+      <p style="color: var(--fg3); font-size: 11px;">
+        Codex skips new or changed hooks until you approve them: ChatGPT →
+        <span style="color: var(--fg2);">Settings → Hooks</span>, or
+        <span class="tabular-nums">/hooks</span> in the CLI. Rotating the receiver token changes
+        them, so approve again after a rotation.
+      </p>
     </div>
 
     <!-- Project aliases -->

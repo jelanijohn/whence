@@ -250,6 +250,8 @@ pub fn run() {
             commands::open_settings,
             commands::install_claude_hooks,
             commands::uninstall_claude_hooks,
+            commands::install_codex_hooks,
+            commands::uninstall_codex_hooks,
             commands::get_receiver_auth,
             commands::rotate_receiver_token,
         ])

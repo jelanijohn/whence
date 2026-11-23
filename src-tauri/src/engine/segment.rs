@@ -323,6 +323,7 @@ fn surface_label(s: Surface) -> &'static str {
         Surface::Terminal => "terminal",
         Surface::ClaudeDesktop => "claude desktop",
         Surface::Browser => "browser",
+        Surface::Codex => "codex",
     }
 }
 
@@ -337,6 +338,7 @@ fn source_key(ev: &WorkEvent) -> String {
         Surface::Terminal => "terminal",
         Surface::ClaudeDesktop => "claude-desktop",
         Surface::Browser => "browser",
+        Surface::Codex => "codex",
     };
     format!("{tag}\u{1f}{}", ev.source.as_deref().unwrap_or(""))
 }

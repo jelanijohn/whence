@@ -221,12 +221,27 @@ Whence never edits shell rc files; enabling the setting alone does nothing
 until you add the hook (the snippet is in Settings). The cwd-to-`WorkEvent`
 mapping is pure and fixture-tested; only the socket is impure.
 
-### 5.4 Claude Desktop chat tab (deferred)
+### 5.4 Claude Desktop (Code tab covered; chat tab and Cowork deferred)
 
-Claude Desktop's chat tab has no clean local artifact or hook to read, so the
-only capture options are fragile (accessibility-tree scraping) or manual.
-**Deferred** — Claude Code + the browser are the clean signals; don't let the
-hardest surface gate releases.
+Claude Desktop is three surfaces, not one:
+
+* **Code tab, local sessions — covered by §5.1, no separate adapter.** The
+  desktop app reads the same `~/.claude/settings.json` and writes the same
+  transcripts as the CLI, so the transcript watcher and the installed hooks
+  already see it. No hook-payload field identifies the owning client, so these
+  sessions are `claude-code` rows — Whence doesn't guess a "desktop" label.
+  (Cloud and SSH sessions don't read the local settings and aren't seen.)
+* **Chat tab — deferred.** No clean local artifact or hook to read; plugin
+  hooks are disabled in chat, so the only capture options are fragile
+  (accessibility-tree scraping, a CDP read —
+  `docs/desktop-cloud-chat-attribution.md`) or manual.
+* **Cowork — open.** Plugin-bundled hooks do run in Cowork, but it's
+  undocumented whether they run on the host or in a VM, whether they can reach
+  the host's loopback, and a plugin has no way to carry the receiver token.
+  Unprobed; no adapter.
+
+Claude Code + the browser are the clean signals; don't let the hardest surface
+gate releases.
 
 ### 5.5 Browser LLM chat (originating-capable, opt-in)
 
@@ -273,18 +288,84 @@ host+path, to patch in one place.
 
 ### 5.6 Receiver auth (all loopback listeners)
 
-All three loopback receivers — hooks `18450`, terminal `18451`, browser `18452`
-(including `GET /raise`) — are **bearer-gated** by a per-install token
+All three loopback receivers — hooks `18450` (both its Claude route and the
+`/codex` route, §5.7), terminal `18451`, browser `18452` (including
+`GET /raise`) — are **bearer-gated** by a per-install token
 (`auth.rs`): minted at first launch, stored `0600` as
 `<app_data_dir>/receiver.token`, shown and rotatable in Settings, applied live
 via a shared handle so rotation needs no restart.
 
 Carriers differ per receiver: the installed hook URL embeds the token
-(`/hook/<token>` — `http` hooks can't set headers); the terminal snippet and
-the extension send `Authorization: Bearer`. Unauthenticated requests get 401
+(`/hook/<token>` — `http` hooks can't set headers); the installed Codex hook
+command, the terminal snippet and the extension send `Authorization: Bearer`. Unauthenticated requests get 401
 and bump a visible denial counter — diagnostic, never evaluative. The request
 check (`request_authorized`) is pure and fixture-tested; the sockets stay the
 only impure part.
+
+### 5.7 Codex / ChatGPT Work local sessions (originating-capable, opt-in)
+
+OpenAI's Codex runtime — the CLI and ChatGPT Desktop's *Work → Local* mode —
+runs lifecycle hooks from `$CODEX_HOME/hooks.json` (default
+`~/.codex/hooks.json`, `%USERPROFILE%\.codex\hooks.json`). It has no `http`
+hook type, only `command` (event JSON on stdin), so the installed hook is a
+`curl` one-liner that pipes stdin to the **existing** hooks receiver under a
+`/codex` path, token in the `Authorization` header. One socket, two dialects:
+the first path segment picks the mapper (`hooks::route`), so there is no new
+listener.
+
+Hooks are the *only* signal — there is no Codex transcript watcher (the
+rollout format is documented as unstable) — so the mapping
+(`adapters/codex.rs`, pure and fixture-tested) is wider than Claude's:
+`SessionStart` / `SessionEnd` bookend, `UserPromptSubmit` → `prompt`,
+`PostToolUse` → `tool_use`, `Stop` and `PermissionRequest` → `awaiting_input`
+(Codex has no `Notification` event). Everything else is dropped. `source` is
+the payload's `session_id`; the project is the cwd basename through the shared
+`slugify`, with a `project_aliases` override keyed by that basename. A payload
+with no cwd yields no event.
+
+**Read scope.** The hook pipes Codex's whole payload over loopback, but the
+payload struct names only `hook_event_name`, `session_id`, `cwd`, `turn_id`
+and `prompt` — tool input, tool output and the assistant's reply are never deserialized
+(pinned by test). The prompt is retained only under the existing
+`context_hook_prompts` gate, as the same display-only `HookPrompt` moment (§9).
+
+**Out-of-order delivery.** Every installed hook is a backgrounded `curl`, so
+arrival order is not event order. `codex::TurnGuard` (pure, fixture-tested,
+owned by the receiver thread) drops stale deliveries before they are mapped,
+keyed on `session_id` + `turn_id`: a `PostToolUse` / `PermissionRequest` for a
+turn that already stopped (it would flip an *awaiting* row back to active with
+nothing left to correct it); a `Stop` for a turn the next prompt has already
+superseded (it would mark a working row *awaiting*); and anything after
+`SessionEnd` (it would re-create the dropped row). A prompt or `SessionStart`
+is never dropped. This lives in the adapter rather than `segment.rs` because
+the engine's Claude Code guard ("generic activity never overrides awaiting")
+can't be reused: the legitimate `PermissionRequest` → approve → `PostToolUse`
+resume happens within one turn, and only `turn_id` — adapter-native, never on
+a `WorkEvent` — tells it from a straggler. Payloads missing the ids are
+admitted unchanged, so the guard degrades to unguarded, never to lost signal.
+
+**Opt-in, twice.** `codex_enabled` (default off, read per request — no restart)
+gates the route: off means `/codex` payloads are accepted and dropped
+unparsed. `install_codex_hooks` / `uninstall_codex_hooks` (Settings buttons) do
+the same merge-preserving round-trip as §5.1, matching our entries by receiver
+URL so any token generation is pruned. The entry is `async: true` with a 2 s
+`curl` cap, so a missing Whence never stalls a turn; `commandWindows` names
+`curl.exe` because PowerShell aliases bare `curl`.
+
+**Honest limitations.**
+* Codex trusts hooks by content hash: installed hooks are *skipped* until
+  approved in Codex's hook review (ChatGPT → Settings → Hooks, or `/hooks`).
+  Token rotation rewrites the command, so it needs re-approval — the rotation
+  result says so.
+* The receiver token sits in plaintext in `hooks.json`, as it does in
+  `.claude/settings.json`.
+* No payload field identifies the client, so the CLI and the desktop app are
+  one `codex` surface.
+* Cloud-orchestrated sessions (even with local computer access) and ordinary
+  ChatGPT chats run no local hooks and are not seen.
+* The out-of-order guard needs `turn_id` on the payload; an event without one
+  is admitted as-is, so on such a payload a late `PostToolUse` after `Stop`
+  could still flip a row back to active until the idle timeout.
 
 ---
 
@@ -295,7 +376,8 @@ Every adapter emits the same normalized shape:
 ```ts
 interface WorkEvent {
   ts: string;            // ISO timestamp
-  surface: "claude-code" | "ollama" | "terminal" | "browser" | "claude-desktop";
+  surface: "claude-code" | "ollama" | "terminal" | "browser" | "claude-desktop"
+         | "codex";      // "claude-desktop" is reserved — nothing emits it (§5.4)
   source: string;        // stable per-instance source id (one Claude Code session,
                          // one browser tab, …) — distinct concurrent sources on the
                          // same surface/project get distinct ids; the roster keys on it
@@ -312,7 +394,8 @@ interface WorkEvent {
 `source` is what the roster (§9) groups and counts on: `project` groups
 sources, `source` distinguishes the concurrent ones within a group. Adapters
 mint it stably — Claude Code from the transcript file id, the browser adapter
-from its `provider_project_id` / tab identity, terminal from the shell PID.
+from its `provider_project_id` / tab identity, terminal from the shell PID,
+Codex from the hook payload's `session_id`.
 
 ### Project-slug resolution
 
@@ -707,7 +790,7 @@ whence/
 │   ├── settings.rs               # JSON settings file in the app data dir
 │   ├── tray.rs                   # system tray (restore + quit)
 │   ├── adapters/                 # mod (WorkEvent + slugify), claude_code, hooks,
-│   │                             #   ollama, terminal, browser, browser_map
+│   │                             #   codex, ollama, terminal, browser, browser_map
 │   ├── engine/
 │   │   ├── segment.rs            # debounce / switch / blocks — PURE, fixture-tested
 │   │   └── timeline.rs           # JSONL store, one block per line
@@ -741,8 +824,8 @@ connection-health dot; browser LLM adapter + extension (§5.5); context strings
 (§9); settings popup window + appearance controls.
 * **v2 — payoff pipes.** WAID timeline ingestion + intention-vs-reality (§10;
 contract in [`docs/waid-ingestion-contract.md`](docs/waid-ingestion-contract.md));
-surface coverage expansion — including IDE adapters (Cursor, Codex, IntelliJ,
-VS Code), each following the §4 rule: one new file under `adapters/`, nothing
+surface coverage expansion — Codex / ChatGPT Work local hooks shipped (§5.7);
+remaining IDE adapters (Cursor, IntelliJ, VS Code), each following the §4 rule: one new file under `adapters/`, nothing
 else changes. Who Am I inbox candidates deferred.
 * **v2 (optional) — richer candidates.** Thread an aggregated semantic `detail`
 summary into `FocusBlock` so WAID's ingest can draft *what* you did, not just
@@ -760,7 +843,9 @@ resolve latest-wins, skip dropped) and dedupes on `(project, start)`.
 
 Originally the open-decisions list; now the record of how each fork resolved.
 
-1. **Claude Desktop chat-tab capture** — **deferred** (still open; §5.4).
+1. **Claude Desktop chat-tab capture** — **deferred** (still open; §5.4). The
+*Code* tab turned out to need nothing: it shares `~/.claude` with the CLI, so
+§5.1 already covers it. Cowork is open pending a loopback-reachability probe.
 2. **v1 surface allowlist** — resolved by shipping: transcripts first, hooks +
 Ollama + terminal in v1.5, browser after.
 3. **Awaiting-input gating** — **resolved:** status surfaces immediately, focus
@@ -785,6 +870,12 @@ I inbox candidates deferred. The §2–§3 non-surveillance constraints are
 retained verbatim — they are load-bearing for the widget identity, not just
 the sensor's. Narrative:
 [`docs/case-study-identity-pivot.md`](docs/case-study-identity-pivot.md).
+10. **Codex hooks: reuse the hooks receiver (2026-11-22)** — **resolved:** a
+`/codex` route on `18450` rather than a fourth listener, and a raw `curl` pipe
+rather than a field-filtering hook script (no `jq`/Python dependency on the
+user's machine; the receiver's struct is the read-scope boundary instead).
+Desktop-vs-CLI labelling rejected for both runtimes — no documented signal
+(§5.4, §5.7).
 
 ---
 

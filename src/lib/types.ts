@@ -6,7 +6,8 @@ export type Surface =
   | "ollama"
   | "terminal"
   | "claude-desktop"
-  | "browser";
+  | "browser"
+  | "codex";
 
 export type WorkKind =
   | "session_start"
@@ -148,6 +149,7 @@ export interface Settings {
   claudeDir?: string | null; // override the .claude dir (transcripts + hooks install); null = auto (native home → WSL distro walk on Windows)
   projectAliases: Record<string, string>; // transcript dir-name → canonical slug
   hookListenAddrOverride?: string | null; // override hook receiver bind; null = default 127.0.0.1:18450
+  codexEnabled: boolean; // accept Codex / ChatGPT Work local hook events on the hooks receiver; opt-in, default false
   ollamaEnabled: boolean; // poll Ollama for inference liveness (low-confidence status only)
   ollamaEndpoint?: string | null; // override Ollama API origin; null = default http://localhost:11434
   terminalEnabled: boolean; // receive shell cwd hints (low-confidence corroborator only)
