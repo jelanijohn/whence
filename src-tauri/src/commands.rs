@@ -910,13 +910,23 @@ mod tests {
         assert_eq!(rows(&seg), vec![(Surface::Codex, Some("thr_2".to_string()))]);
 
         // Dismissing the last source closes the block and drops the project.
+        seg.ingest(&live(5, Surface::Codex, Some("thr_2"), WorkKind::ToolUse));
         let fx = seg.ingest(&dismiss_event(
             "whence".into(),
             Surface::Codex,
             Some("thr_2".into()),
             now(),
         ));
-        assert!(fx.iter().any(|e| matches!(e, Effect::BlockClosed(_))));
+        // The block keeps what it accrued: it ends at the project's last real
+        // activity (12:00:05), not at its start and not at the dismissal time.
+        let block = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::BlockClosed(b) => Some(b),
+                _ => None,
+            })
+            .expect("last source dismissed → block closes");
+        assert_eq!(block.end - block.start, 5);
         assert!(seg.snapshot().projects.is_empty());
 
         // Not a mute: a session that is in fact alive comes straight back.

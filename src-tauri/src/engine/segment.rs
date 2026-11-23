@@ -471,20 +471,26 @@ impl Segmenter {
         // the same project keeps it attributed.
         if matches!(ev.kind, WorkKind::SessionEnd) {
             let key = source_key(ev);
+            let last_activity;
             let now_empty = {
                 let Some(proj) = self.projects.get_mut(&project) else {
                     return finish(effects, dirty);
                 };
+                // Read the project's last activity *before* removing the source: once
+                // its last source is gone there is nothing left to read it from, and
+                // the block would close at its own start — a zero-length block that
+                // throws away everything accrued.
+                last_activity = proj.last_activity();
                 if proj.sources.remove(&key).is_some() {
                     dirty = true;
                 }
                 proj.sources.is_empty()
             };
             if now_empty {
-                // Close while the (now sourceless) project is still in the map so the
-                // block ends at its last activity, then drop the project.
+                // The project is sourceless now, so the block ends at the last
+                // activity captured above; then drop the project.
                 if self.active.as_deref() == Some(project.as_str()) {
-                    if let Some(closed) = self.close_active() {
+                    if let Some(closed) = self.close_active_ending(last_activity) {
                         effects.push(closed);
                     }
                 }
@@ -793,9 +799,19 @@ impl Segmenter {
     /// activity (not the call time). Clears the active pointer + accounting. Returns
     /// the `BlockClosed` effect, or `None` if nothing was active.
     fn close_active(&mut self) -> Option<Effect> {
+        self.close_active_ending(None)
+    }
+
+    /// [`close_active`](Self::close_active) for a project whose sources may already
+    /// be gone: `last_activity` is the fallback end when none can be read off the
+    /// project any more (the `SessionEnd` of its last source).
+    fn close_active_ending(&mut self, last_activity: Option<i64>) -> Option<Effect> {
         let project = self.active.take()?;
         let start = self.active_since.take().unwrap_or(0);
-        let end = self.project_last_activity(&project).unwrap_or(start);
+        let end = self
+            .project_last_activity(&project)
+            .or(last_activity)
+            .unwrap_or(start);
         let block = FocusBlock {
             project,
             start,
@@ -1142,6 +1158,20 @@ mod tests {
         assert_eq!(closed(&end)[0].project, "waid");
         assert!(projects(&s).is_empty());
         assert_eq!(active(&s), None);
+    }
+
+    #[test]
+    fn ending_the_last_source_closes_the_block_at_its_last_activity() {
+        // Regression: the source was removed before the close read the project's
+        // last activity, so the block closed at its own start (zero length).
+        let mut s = Segmenter::new(SegmentConfig::default());
+        s.ingest(&ev(0, "waid"));
+        s.ingest(&ev(40, "waid"));
+        let end = s.ingest(&status_ev(100, "waid", WorkKind::SessionEnd));
+        let block = &closed(&end)[0];
+        // Ends at the last real activity — not at the start, and not at the
+        // SessionEnd's own (possibly much later) time.
+        assert_eq!(block.end - block.start, 40);
     }
 
     #[test]
